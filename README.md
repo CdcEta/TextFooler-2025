@@ -79,7 +79,11 @@ cd ..
 ## 📂 3. 准备数据和预训练资源
 
 - 攻击使用的数据可以直接放置到 `data/` 目录下
-- 若要训练目标模型，可进入 `BERT/` 子目录运行对应的微调脚本
+-   若打算训练目标模型：
+下载作者提供的完整且处理好的[数据集](https://drive.google.com/open?id=1N-FYUa5XN8qDs4SgttQQnrkeTXXAXjTv)（放在./TextFooler-master/traindata/xx），修改./TextFooler-master/BERT/run_classifier_XX.py中的data_dir，进入目录./TextFooler-master/BERT并且运行指令：
+```bash
+python run_classifier_XX.py
+```
 
 以 AG 新闻分类为例：
 
@@ -119,7 +123,7 @@ python comp_cos_sim_mat.py ./Embeddings/counter-fitted-vectors.txt
 |------|------|
 | `--dataset_path` | 数据集路径 |
 | `--target_model` | 目标模型，如 `bert`、`lstm` |
-| `--target_model_path` | 模型权重路径 |
+| `--target_model_path` | 模型权重路径，可以下载作者[训练过的BERT模型参数](https://drive.google.com/drive/folders/1wKjelHFcqsT3GgA7LzWmoaAHcUkP4c7B?usp=sharing)，[训练过的LSTM模型参数](https://drive.google.com/drive/folders/108myH_HHtBJX8MvhBQuvTGb-kGOce5M2?usp=sharing)，[训练过的CNN模型参数](https://drive.google.com/drive/folders/1Ifowzfers0m1Aw2vE8O7SMifHUhkTEjh?usp=sharing) |
 | `--counter_fitting_embeddings_path` | 反拟合词向量路径 |
 | `--counter_fitting_cos_sim_path` | 预计算相似度矩阵路径（可选） |
 | `--USE_cache_path` | USE 模型缓存路径（为空则自动下载） |
