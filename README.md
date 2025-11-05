@@ -201,10 +201,10 @@ TextFooler/
 │   ├── pytorch_cache
 │   └── results          # 攻击 / 训练输出目录
 │          ├── ag   
-│         │   ├── bert_config.json
-│         │   ├── eval_results.txt
-│         │   ├── pytorch_model.bin
-│         │   └── vocab.txt
+│          │   ├── bert_config.json
+│          │   ├── eval_results.txt
+│          │   ├── pytorch_model.bin
+│          │   └── vocab.txt
 │          └──…         
 │
 ├── ESIM/                           #  ESIM 模型目录（若使用 NLI ESIM）
