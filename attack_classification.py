@@ -1,3 +1,5 @@
+# 本文件：用于对单句文本分类模型执行对抗攻击（TextFooler）。
+# 关键步骤：词重要性计算、同义词检索、USE 语义相似度过滤、词性约束（POS）。
 import argparse
 import os
 import numpy as np
@@ -22,6 +24,11 @@ from BERT.modeling import BertForSequenceClassification, BertConfig
 
 
 class USE(object):
+    """USE 句向量模块：加载 TFHub 模块并提供语义相似度计算。
+
+    - 通过 `TFHUB_CACHE_DIR` 指定缓存目录
+    - 构建图并在会话中计算两段文本的余弦相似度与角度相似度
+    """
     def __init__(self, cache_path):
         super(USE, self).__init__()
         os.environ['TFHUB_CACHE_DIR'] = cache_path
@@ -54,6 +61,7 @@ class USE(object):
 
 def pick_most_similar_words_batch(src_words, sim_mat, idx2word, ret_count=10, threshold=0.):
     """
+    在相似度矩阵中为每个词选取近邻候选词（排除自身）。
     embeddings is a matrix with (d, vocab_size)
     """
     sim_order = np.argsort(-sim_mat[src_words, :])[:, 1:1 + ret_count]
@@ -113,12 +121,7 @@ class InputFeatures(object):
 
 class NLIDataset_BERT(Dataset):
     """
-    Dataset class for Natural Language Inference datasets.
-
-    The class can be used to read preprocessed datasets where the premises,
-    hypotheses and labels have been transformed to unique integer indices
-    (this can be done with the 'preprocess_data' script in the 'scripts'
-    folder of this repository).
+    BERT 分类数据封装：将文本切分为 token，并构造 `input_ids`/`input_mask`/`segment_ids`。
     """
 
     def __init__(self,
@@ -145,7 +148,7 @@ class NLIDataset_BERT(Dataset):
         self.batch_size = batch_size
 
     def convert_examples_to_features(self, examples, max_seq_length, tokenizer):
-        """Loads a data file into a list of `InputBatch`s."""
+        """将文本序列转换为 BERT 可接受的特征列表。"""
 
         features = []
         for (ex_index, text_a) in enumerate(examples):
@@ -181,6 +184,7 @@ class NLIDataset_BERT(Dataset):
         return features
 
     def transform_text(self, data, batch_size=32):
+        """将文本批量转换为 `TensorDataset` 并构建 `DataLoader`。"""
         # transform data into seq of embeddings
         eval_features = self.convert_examples_to_features(data,
                                                           self.max_seq_length, self.tokenizer)
@@ -200,7 +204,15 @@ class NLIDataset_BERT(Dataset):
 def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, cos_sim, sim_predictor=None,
            import_score_threshold=-1., sim_score_threshold=0.5, sim_score_window=15, synonym_num=50,
            batch_size=32):
-    # first check the prediction of the original text
+    """
+    执行 TextFooler 攻击流程：
+    - 计算词重要性（leave-one-out）并按重要性降序尝试替换；
+    - 基于相似度矩阵为词检索同义词候选；
+    - 使用 USE 在滑动窗口上计算语义相似度，过滤低相似候选；
+    - 结合 POS 约束过滤语法不一致候选；
+    返回：对抗文本、修改词数、原标签、攻击后标签、查询次数。
+    """
+    # 先检查原始文本的预测结果
     orig_probs = predictor([text_ls]).squeeze()
     orig_label = torch.argmax(orig_probs)
     orig_prob = orig_probs.max()
@@ -214,7 +226,7 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
         num_queries = 1
 
         # get the pos and verb tense info
-        pos_ls = criteria.get_pos(text_ls)
+        pos_ls = criteria.get_pos(text_ls)  # 词性序列，用于后续 POS 约束过滤
 
         # get importance score
         leave_1_texts = [text_ls[:ii] + ['<oov>'] + text_ls[min(ii + 1, len_text):] for ii in range(len_text)]
@@ -225,7 +237,7 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
                     leave_1_probs.max(dim=-1)[0] - torch.index_select(orig_probs, 0,
                                                                       leave_1_probs_argmax))).data.cpu().numpy()
 
-        # get words to perturb ranked by importance scorefor word in words_perturb
+        # 根据重要性得分筛选需要扰动的词（过滤停用词）
         words_perturb = []
         for idx, score in sorted(enumerate(import_scores), key=lambda x: x[1], reverse=True):
             try:
@@ -234,7 +246,7 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
             except:
                 print(idx, len(text_ls), import_scores.shape, text_ls, len(leave_1_texts))
 
-        # find synonyms
+        # 为待扰动词查找同义词候选
         words_perturb_idx = [word2idx[word] for idx, word in words_perturb if word in word2idx]
         synonym_words, _ = pick_most_similar_words_batch(words_perturb_idx, cos_sim, idx2word, synonym_num, 0.5)
         synonyms_all = []
@@ -244,7 +256,7 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
                 if synonyms:
                     synonyms_all.append((idx, synonyms))
 
-        # start replacing and attacking
+        # 开始逐词替换并攻击
         text_prime = text_ls[:]
         text_cache = text_prime[:]
         num_changed = 0
@@ -252,7 +264,7 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
             new_texts = [text_prime[:idx] + [synonym] + text_prime[min(idx + 1, len_text):] for synonym in synonyms]
             new_probs = predictor(new_texts, batch_size=batch_size)
 
-            # compute semantic similarity
+            # 计算语义相似度（滑动窗口），用于过滤低相似的替换
             if idx >= half_sim_score_window and len_text - idx - 1 >= half_sim_score_window:
                 text_range_min = idx - half_sim_score_window
                 text_range_max = idx + half_sim_score_window + 1
@@ -273,9 +285,9 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
             if len(new_probs.shape) < 2:
                 new_probs = new_probs.unsqueeze(0)
             new_probs_mask = (orig_label != torch.argmax(new_probs, dim=-1)).data.cpu().numpy()
-            # prevent bad synonyms
+            # 过滤语义不相似的候选
             new_probs_mask *= (semantic_sims >= sim_score_threshold)
-            # prevent incompatible pos
+            # 过滤词性不兼容的候选
             synonyms_pos_ls = [criteria.get_pos(new_text[max(idx - 4, 0):idx + 5])[min(4, idx)]
                                if len(new_text) > 10 else criteria.get_pos(new_text)[idx] for new_text in new_texts]
             pos_mask = np.array(criteria.pos_filter(pos_ls[idx], synonyms_pos_ls))
@@ -299,7 +311,13 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
 def random_attack(text_ls, true_label, predictor, perturb_ratio, stop_words_set, word2idx, idx2word, cos_sim,
                   sim_predictor=None, import_score_threshold=-1., sim_score_threshold=0.5, sim_score_window=15,
                   synonym_num=50, batch_size=32):
-    # first check the prediction of the original text
+    """
+    随机选择一定比例的词进行扰动并尝试攻击：
+    - 随机采样扰动位置；
+    - 同义词候选检索与语义/词性过滤；
+    返回与 `attack` 相同的五元组。
+    """
+    # 先检查原始文本的预测结果
     orig_probs = predictor([text_ls]).squeeze()
     orig_label = torch.argmax(orig_probs)
     orig_prob = orig_probs.max()

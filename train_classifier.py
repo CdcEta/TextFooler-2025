@@ -1,3 +1,7 @@
+"""
+本文件：训练与评估文本分类模型（LSTM/CNN），并提供推理接口。
+主要功能：数据分批、模型前向、评估与保存。
+"""
 import os
 import sys
 import argparse
@@ -16,6 +20,11 @@ import dataloader
 import modules
 
 class Model(nn.Module):
+    """文本分类模型封装：
+    - 当 `cnn=True` 时使用多窗口卷积文本编码；
+    - 否则使用双向 LSTM，并对时间维做 max-pooling；
+    - 输出为 `nclasses` 维的分类 logits。
+    """
     def __init__(self, embedding, hidden_size=150, depth=1, dropout=0.3, cnn=False, nclasses=2):
         super(Model, self).__init__()
         self.cnn = cnn
@@ -53,6 +62,7 @@ class Model(nn.Module):
         self.out = nn.Linear(d_out, nclasses)
 
     def forward(self, input):
+        """前向计算：得到文本表示并输出分类分数。"""
         if self.cnn:
             input = input.t()
         emb = self.emb_layer(input)
@@ -69,6 +79,7 @@ class Model(nn.Module):
         return self.out(output)
 
     def text_pred(self, text, batch_size=32):
+        """对原始文本进行批量预测，返回类别概率分布。"""
         batches_x = dataloader.create_batches_x(
             text,
             batch_size, ##TODO
@@ -95,6 +106,7 @@ class Model(nn.Module):
 
 
 def eval_model(niter, model, input_x, input_y):
+    """在给定的输入批次上评估准确率。"""
     model.eval()
     # N = len(valid_x)
     # criterion = nn.CrossEntropyLoss()
@@ -117,6 +129,7 @@ def train_model(epoch, model, optimizer,
         train_x, train_y,
         test_x, test_y,
         best_test, save_path):
+    """单轮训练：前向、反向与优化，并在测试集上评估与保存最优模型。"""
 
     model.train()
     niter = epoch*len(train_x)
@@ -151,11 +164,13 @@ def train_model(epoch, model, optimizer,
     return best_test
 
 def save_data(data, labels, path, type='train'):
+    """将分割后的数据写入到指定路径，便于复现实验。"""
     with open(os.path.join(path, type+'.txt'), 'w') as ofile:
         for text, label in zip(data, labels):
             ofile.write('{} {}\n'.format(label, ' '.join(text)))
 
 def main(args):
+    """主流程：根据数据集加载数据，构建模型，创建批次并循环训练。"""
     if args.dataset == 'mr':
     #     data, label = dataloader.read_MR(args.path)
     #     train_x, train_y, test_x, test_y = dataloader.cv_split2(

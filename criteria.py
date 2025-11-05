@@ -1,3 +1,7 @@
+"""
+本文件：攻击约束与文本分析工具（停用词、词性 POS、动词时态）。
+用于在替换候选中引入语义/语法约束，保证对抗样本自然性。
+"""
 from __future__ import division
 import nltk
 from nltk.stem.wordnet import WordNetLemmatizer
@@ -8,6 +12,7 @@ import random
 
 # Function 0: List of stop words
 def get_stopwords():
+    """返回一组常用英文停用词（源于 NLTK），用于过滤无意义替换。"""
     '''
     :return: a set of 266 stop words from nltk. eg. {'someone', 'anyhow', 'almost', 'none', 'mostly', 'around', 'being', 'fifteen', 'moreover', 'whoever', 'further', 'not', 'side', 'keep', 'does', 'regarding', 'until', 'across', 'during', 'nothing', 'of', 'we', 'eleven', 'say', 'between', 'upon', 'whole', 'in', 'nowhere', 'show', 'forty', 'hers', 'may', 'who', 'onto', 'amount', 'you', 'yours', 'his', 'than', 'it', 'last', 'up', 'ca', 'should', 'hereafter', 'others', 'would', 'an', 'all', 'if', 'otherwise', 'somehow', 'due', 'my', 'as', 'since', 'they', 'therein', 'together', 'hereupon', 'go', 'throughout', 'well', 'first', 'thence', 'yet', 'were', 'neither', 'too', 'whether', 'call', 'a', 'without', 'anyway', 'me', 'made', 'the', 'whom', 'but', 'and', 'nor', 'although', 'nine', 'whose', 'becomes', 'everywhere', 'front', 'thereby', 'both', 'will', 'move', 'every', 'whence', 'used', 'therefore', 'anyone', 'into', 'meanwhile', 'perhaps', 'became', 'same', 'something', 'very', 'where', 'besides', 'own', 'whereby', 'whither', 'quite', 'wherever', 'why', 'latter', 'down', 'she', 'sometimes', 'about', 'sometime', 'eight', 'ever', 'towards', 'however', 'noone', 'three', 'top', 'can', 'or', 'did', 'seemed', 'that', 'because', 'please', 'whereafter', 'mine', 'one', 'us', 'within', 'themselves', 'only', 'must', 'whereas', 'namely', 'really', 'yourselves', 'against', 'thus', 'thru', 'over', 'some', 'four', 'her', 'just', 'two', 'whenever', 'seeming', 'five', 'him', 'using', 'while', 'already', 'alone', 'been', 'done', 'is', 'our', 'rather', 'afterwards', 'for', 'back', 'third', 'himself', 'put', 'there', 'under', 'hereby', 'among', 'anywhere', 'at', 'twelve', 'was', 'more', 'doing', 'become', 'name', 'see', 'cannot', 'once', 'thereafter', 'ours', 'part', 'below', 'various', 'next', 'herein', 'also', 'above', 'beside', 'another', 'had', 'has', 'to', 'could', 'least', 'though', 'your', 'ten', 'many', 'other', 'from', 'get', 'which', 'with', 'latterly', 'now', 'never', 'most', 'so', 'yourself', 'amongst', 'whatever', 'whereupon', 'their', 'serious', 'make', 'seem', 'often', 'on', 'seems', 'any', 'hence', 'herself', 'myself', 'be', 'either', 'somewhere', 'before', 'twenty', 'here', 'beyond', 'this', 'else', 'nevertheless', 'its', 'he', 'except', 'when', 'again', 'thereupon', 'after', 'through', 'ourselves', 'along', 'former', 'give', 'enough', 'them', 'behind', 'itself', 'wherein', 'always', 'such', 'several', 'these', 'everyone', 'toward', 'have', 'nobody', 'elsewhere', 'empty', 'few', 'six', 'formerly', 'do', 'no', 'then', 'unless', 'what', 'how', 'even', 'i', 'indeed', 'still', 'might', 'off', 'those', 'via', 'fifty', 'each', 'out', 'less', 're', 'take', 'by', 'hundred', 'much', 'anything', 'becoming', 'am', 'everything', 'per', 'full', 'sixty', 'are', 'bottom', 'beforehand'}
     '''
@@ -31,6 +36,7 @@ UniversalPos = ['NOUN', 'VERB', 'ADJ', 'ADV',
 
 # Function 1:
 def get_pos(sent, tagset='universal'):
+    """返回分词后的词性序列（默认使用 universal 粗粒度标签）。"""
     '''
     :param sent: list of word strings
     tagset: {'universal', 'default'}
@@ -59,6 +65,7 @@ def get_pos(sent, tagset='universal'):
 
 # Function 2: Pos Filter
 def pos_filter(ori_pos, new_pos_list):
+    """词性过滤：保留与原词性一致或在 {NOUN, VERB} 集合内的替换。"""
     same = [True if ori_pos == new_pos or (set([ori_pos, new_pos]) <= set(['NOUN', 'VERB']))
             else False
             for new_pos in new_pos_list]
@@ -67,6 +74,7 @@ def pos_filter(ori_pos, new_pos_list):
 
 # Function 3:
 def get_v_tense(sent):
+    """抽取动词时态标签（VB/VBD/VBG/VBN/VBP/VBZ），返回词索引到时态的映射。"""
     '''
     :param sent: a list of words
     :return tenses: a dict {key (word ix): value (tense, e.g. VBD)}
@@ -85,6 +93,7 @@ def get_v_tense(sent):
 
 
 def change_tense(word, tense, lemmatize=False):
+    """将动词词形变换到指定时态；可选词形还原以增强适配性。"""
     '''
     en.verb.tenses():
         ['past', '3rd singular present', 'past participle', 'infinitive',

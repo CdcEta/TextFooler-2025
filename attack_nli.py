@@ -1,3 +1,5 @@
+# 本文件：用于自然语言推理（NLI）任务的攻击与预测封装。
+# 支持 InferSent / ESIM / BERT 三种目标模型，并使用 USE 计算语义相似度。
 import sys
 import argparse
 import os
@@ -24,6 +26,7 @@ from BERT.modeling import BertForSequenceClassification, BertConfig
 
 
 class NLI_infer_InferSent(nn.Module):
+    """InferSent 模型的预测封装：加载预训练参数并对句对进行前向预测。"""
     def __init__(self,
                  pretrained_file,
                  embedding_path,
@@ -83,6 +86,7 @@ class NLI_infer_InferSent(nn.Module):
 
 
 class NLI_infer_ESIM(nn.Module):
+    """ESIM 模型的预测封装：从检查点中恢复模型，并对句对批量预测。"""
     def __init__(self,
                  pretrained_file,
                  worddict_path,
@@ -140,6 +144,7 @@ class NLI_infer_ESIM(nn.Module):
 
 
 class NLI_infer_BERT(nn.Module):
+    """BERT 模型的预测封装（3 分类）：将句对编码为输入特征并预测概率分布。"""
     def __init__(self,
                  pretrained_dir,
                  max_seq_length=128,
@@ -173,6 +178,7 @@ class NLI_infer_BERT(nn.Module):
 
 
 class USE(object):
+    """USE 句向量模块：加载 TFHub 模型并提供句子相似度计算。"""
     def __init__(self, cache_path):
         super(USE, self).__init__()
         os.environ['TFHUB_CACHE_DIR'] = cache_path
@@ -206,6 +212,7 @@ class USE(object):
 
 def pick_most_similar_words_batch(src_words, sim_mat, idx2word, ret_count=10, threshold=0.):
     """
+    在相似度矩阵中为每个词选取近邻候选词（排除自身）。
     embeddings is a matrix with (d, vocab_size)
     """
     sim_order = np.argsort(-sim_mat[src_words, :])[:, 1:1 + ret_count]
@@ -222,6 +229,7 @@ def pick_most_similar_words_batch(src_words, sim_mat, idx2word, ret_count=10, th
 
 def read_data(filepath, data_size, target_model='infersent', lowercase=False, ignore_punctuation=False, stopwords=[]):
     """
+    读取 NLI 数据文件（SNLI/MNLI 格式），返回词序列与标签字典。
     Read the premises, hypotheses and labels from some NLI dataset's
     file and return them in a dictionary. The file should be in the same
     form as SNLI's .txt files.
@@ -285,13 +293,7 @@ def read_data(filepath, data_size, target_model='infersent', lowercase=False, ig
 
 class NLIDataset_ESIM(Dataset):
     """
-    Dataset class for Natural Language Inference datasets.
-
-    The class can be used to read preprocessed datasets where the premises,
-    hypotheses and labels have been transformed to unique integer indices
-    (this can be done with the 'preprocess_data' script in the 'scripts'
-    folder of this repository).
-    """
+    ESIM 的数据封装：将词序列转换为索引，并对齐到统一长度以便批量预测。"""
 
     def __init__(self,
                  worddict_path,
@@ -336,15 +338,7 @@ class NLIDataset_ESIM(Dataset):
 
     def words_to_indices(self, sentence):
         """
-        Transform the words in a sentence to their corresponding integer
-        indices.
-
-        Args:
-            sentence: A list of words that must be transformed to indices.
-
-        Returns:
-            A list of indices.
-        """
+        将词序列映射为整数索引；未知词使用 OOV 标记。"""
         indices = []
         # Include the beggining of sentence token at the start of the sentence
         # if one is defined.
@@ -368,18 +362,7 @@ class NLIDataset_ESIM(Dataset):
 
     def transform_to_indices(self, data):
         """
-        Transform the words in the premises and hypotheses of a dataset, as
-        well as their associated labels, to integer indices.
-
-        Args:
-            data: A dictionary containing lists of premises, hypotheses
-                and labels, in the format returned by the 'read_data'
-                method of the Preprocessor class.
-
-        Returns:
-            A dictionary containing the transformed premises, hypotheses and
-            labels.
-        """
+        将数据字典中的前提与假设统一转换为索引序列并返回。"""
         transformed_data = {"premises": [],
                             "hypotheses": []}
 
@@ -396,6 +379,7 @@ class NLIDataset_ESIM(Dataset):
         return transformed_data
 
     def transform_text(self, data):
+        """将文本转为索引并构造张量批次，供 `DataLoader` 使用。"""
         #         # standardize data format
         #         data = defaultdict(list)
         #         for hypothesis in hypotheses:

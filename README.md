@@ -140,13 +140,6 @@ python attack_classification.py \
   --USE_cache_path "./USE_cache_path"
 ```
 
-也可以将指令保存为 `run_attack_classification.py` 并运行：
-
-```bash
-python run_attack_classification.py
-```
-
----
 
 ## 📁 项目结构
 

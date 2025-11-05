@@ -13,7 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""BERT finetuning runner."""
+"""BERT finetuning runner.
+
+中文摘要：BERT 微调与评估入口脚本，包含数据处理器（各任务）、
+特征转换、训练/评估流程与参数解析。通过传入 `--task_name`、
+`--data_dir`、`--output_dir` 等参数执行对应任务的微调。
+"""
 
 from __future__ import absolute_import, division, print_function
 
@@ -556,6 +561,7 @@ def accuracy(out, labels):
 
 
 def main():
+    # 主入口：解析命令行参数，准备数据与模型，执行训练与评估。
     parser = argparse.ArgumentParser()
 
     ## Required parameters

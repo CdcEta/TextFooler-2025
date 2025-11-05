@@ -1,3 +1,7 @@
+"""
+本文件：数据读取与批量封装工具，包括清洗文本、读取带标签语料、
+分批（batch）与词向量加载，供训练与推理使用。
+"""
 import gzip
 import os
 import sys
@@ -28,6 +32,12 @@ def clean_str(string, TREC=False):
     return string.strip() if TREC else string.strip().lower()
 
 def read_corpus(path, clean=True, MR=True, encoding='utf8', shuffle=False, lower=True):
+    """读取语料文件并返回分词后的文本与标签。
+
+    - 当 `MR=True` 按空格分割取首列为标签；否则按逗号分割并将标签从 1 开始改为 0 基。
+    - `clean` 控制是否进行基础清洗，`lower` 控制是否转为小写。
+    - `shuffle` 为随机打乱样本顺序。
+    """
     data = []
     labels = []
     with open(path, encoding=encoding) as fin:
@@ -143,9 +153,7 @@ def cv_split2(data, labels, nfold, valid_id):
     return train_x, train_y, valid_x, valid_y
 
 def pad(sequences, pad_token='<pad>', pad_left=True):
-    ''' input sequences is a list of text sequence [[str]]
-        pad each text sequence to the length of the longest
-    '''
+    '''输入为若干文本序列（[[str]]），将其统一填充到最长序列长度。'''
     max_len = max(5,max(len(seq) for seq in sequences))
     if pad_left:
         return [ [pad_token]*(max_len-len(seq)) + seq for seq in sequences ]
@@ -176,6 +184,7 @@ def create_one_batch_x(x, map2id, oov='<oov>'):
 
 # shuffle training examples and create mini-batches
 def create_batches(x, y, batch_size, map2id, perm=None, sort=False):
+    """打乱并分批训练样本，返回张量批次（inputs 与 labels）。"""
 
     lst = perm or range(len(x))
 
@@ -213,6 +222,7 @@ def create_batches(x, y, batch_size, map2id, perm=None, sort=False):
 
 # shuffle training examples and create mini-batches
 def create_batches_x(x, batch_size, map2id, perm=None, sort=False):
+    """仅对文本进行分批（无标签），用于推理阶段。"""
 
     lst = perm or range(len(x))
 
@@ -244,10 +254,12 @@ def create_batches_x(x, batch_size, map2id, perm=None, sort=False):
 
 
 def load_embedding_npz(path):
+    """从 `.npz` 文件加载词向量，返回词表与向量矩阵。"""
     data = np.load(path)
     return [ w.decode('utf8') for w in data['words'] ], data['vals']
 
 def load_embedding_txt(path):
+    """从文本或压缩文件加载词向量，返回词表与向量矩阵。"""
     file_open = gzip.open if path.endswith(".gz") else open
     words = [ ]
     vals = [ ]
@@ -262,6 +274,7 @@ def load_embedding_txt(path):
     return words, np.asarray(vals).reshape(len(words),-1)
 
 def load_embedding(path):
+    """根据文件后缀自动选择加载器。"""
     if path.endswith(".npz"):
         return load_embedding_npz(path)
     else:

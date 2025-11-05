@@ -1,3 +1,7 @@
+"""
+本文件：模型组件，包括文本卷积编码器 CNN_Text 与词嵌入层 EmbeddingLayer。
+提供基础模块以供训练/推理复用。
+"""
 import sys
 
 import torch
@@ -13,6 +17,7 @@ def deep_iter(x):
         yield x
 
 class CNN_Text(nn.Module):
+    """多窗口卷积文本编码器：对嵌入序列进行多尺度卷积 + 最大池化。"""
 
     def __init__(self, n_in, widths=[3,4,5], filters=100):
         super(CNN_Text,self).__init__()
@@ -31,6 +36,11 @@ class CNN_Text(nn.Module):
 
 
 class EmbeddingLayer(nn.Module):
+    """词嵌入层：
+    - 支持加载预训练词向量并固定其梯度；
+    - 自动加入 OOV 与 PAD 特殊标记；
+    - 可选归一化以提升稳定性。
+    """
     def __init__(self, n_d=100, embs=None, fix_emb=True, oov='<oov>', pad='<pad>', normalize=True):
         super(EmbeddingLayer, self).__init__()
         word2id = {}
