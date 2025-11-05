@@ -81,32 +81,101 @@ class NLI_infer_BERT(nn.Module):
                  pretrained_dir,
                  nclasses,
                  max_seq_length=128,
-                 batch_size=32):
+                 batch_size=32,
+                 auto_gpu=False,
+                 gpu_fill_target=0.9):
         super(NLI_infer_BERT, self).__init__()
         self.model = BertForSequenceClassification.from_pretrained(pretrained_dir, num_labels=nclasses).cuda()
 
         # construct dataset loader
         self.dataset = NLIDataset_BERT(pretrained_dir, max_seq_length=max_seq_length, batch_size=batch_size)
+        self.auto_gpu = auto_gpu
+        self.gpu_fill_target = gpu_fill_target
+        self.current_step = "-"
+
+    def _tune_batch_size(self, text_data, init_bs):
+        if not torch.cuda.is_available():
+            return init_bs
+        try:
+            self.model.eval()
+            probe_bs = max(1, min(init_bs, 16))
+            sample = text_data[0] if len(text_data) > 0 else ["test"]
+            probe_chunk = [sample] * probe_bs
+            feats = self.dataset.convert_examples_to_features(probe_chunk, self.dataset.max_seq_length, self.dataset.tokenizer)
+            ids = torch.tensor([f.input_ids for f in feats], dtype=torch.long).cuda(non_blocking=True)
+            msk = torch.tensor([f.input_mask for f in feats], dtype=torch.long).cuda(non_blocking=True)
+            seg = torch.tensor([f.segment_ids for f in feats], dtype=torch.long).cuda(non_blocking=True)
+            free_before, total = torch.cuda.mem_get_info()
+            with torch.no_grad():
+                _ = self.model(ids, seg, msk)
+            free_after, _ = torch.cuda.mem_get_info()
+            used = max(1, int(free_before - free_after))
+            per_sample = max(1, used // probe_bs)
+            target = int(free_after * float(self.gpu_fill_target))
+            bs_fit = max(1, min(4096, target // per_sample))
+            return bs_fit
+        except Exception:
+            # Fallback: doubling until OOM then backoff
+            bs = max(1, init_bs)
+            max_bs = bs
+            while True:
+                try:
+                    sample = text_data[:bs] if len(text_data) >= bs else text_data
+                    feats = self.dataset.convert_examples_to_features(sample, self.dataset.max_seq_length, self.dataset.tokenizer)
+                    ids = torch.tensor([f.input_ids for f in feats], dtype=torch.long).cuda(non_blocking=True)
+                    msk = torch.tensor([f.input_mask for f in feats], dtype=torch.long).cuda(non_blocking=True)
+                    seg = torch.tensor([f.segment_ids for f in feats], dtype=torch.long).cuda(non_blocking=True)
+                    with torch.no_grad():
+                        _ = self.model(ids, seg, msk)
+                    max_bs = bs
+                    bs = bs * 2
+                    if bs > 4096:
+                        break
+                except RuntimeError as e:
+                    if 'out of memory' in str(e).lower():
+                        torch.cuda.empty_cache()
+                        bs = max(1, bs // 2)
+                        if bs <= max_bs:
+                            break
+                    else:
+                        break
+            return max_bs
 
     def text_pred(self, text_data, batch_size=32):
         # Switch the model to eval mode.
         self.model.eval()
 
-        # transform text data into indices and create batches
-        dataloader = self.dataset.transform_text(text_data, batch_size=batch_size)
+        # decide effective batch size based on GPU memory
+        effective_bs = batch_size
+        if self.auto_gpu:
+            effective_bs = max(batch_size, self._tune_batch_size(text_data, batch_size))
 
+        total_items = len(text_data)
+        processed = 0
         probs_all = []
-        #         for input_ids, input_mask, segment_ids in tqdm(dataloader, desc="Evaluating"):
-        for input_ids, input_mask, segment_ids in dataloader:
-            input_ids = input_ids.cuda()
-            input_mask = input_mask.cuda()
-            segment_ids = segment_ids.cuda()
-
-            with torch.no_grad():
-                logits = self.model(input_ids, segment_ids, input_mask)
-                probs = nn.functional.softmax(logits, dim=-1)
-                probs_all.append(probs)
-
+        i = 0
+        while i < total_items:
+            bs = min(effective_bs, total_items - i)
+            chunk = text_data[i:i+bs]
+            try:
+                feats = self.dataset.convert_examples_to_features(chunk, self.dataset.max_seq_length, self.dataset.tokenizer)
+                input_ids = torch.tensor([f.input_ids for f in feats], dtype=torch.long).cuda(non_blocking=True)
+                input_mask = torch.tensor([f.input_mask for f in feats], dtype=torch.long).cuda(non_blocking=True)
+                segment_ids = torch.tensor([f.segment_ids for f in feats], dtype=torch.long).cuda(non_blocking=True)
+                with torch.no_grad():
+                    logits = self.model(input_ids, segment_ids, input_mask)
+                    probs = nn.functional.softmax(logits, dim=-1)
+                    probs_all.append(probs)
+                processed += bs
+                print(f"STEP_PROGRESS {self.current_step} {processed}/{total_items}")
+                i += bs
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower():
+                    torch.cuda.empty_cache()
+                    effective_bs = max(1, bs // 2)
+                else:
+                    raise
+        print(f"STEP_DONE {self.current_step}")
         return torch.cat(probs_all, dim=0)
 
 
@@ -213,6 +282,14 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
     返回：对抗文本、修改词数、原标签、攻击后标签、查询次数。
     """
     # 先检查原始文本的预测结果
+    # Substep: original prediction check
+    try:
+        owner = getattr(predictor, "__self__", None)
+        if owner is not None:
+            owner.current_step = "Check original prediction"
+            print("STEP_START Check original prediction total=1")
+    except Exception:
+        pass
     orig_probs = predictor([text_ls]).squeeze()
     orig_label = torch.argmax(orig_probs)
     orig_prob = orig_probs.max()
@@ -230,6 +307,14 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
 
         # get importance score
         leave_1_texts = [text_ls[:ii] + ['<oov>'] + text_ls[min(ii + 1, len_text):] for ii in range(len_text)]
+        # Substep: importance scoring
+        try:
+            owner = getattr(predictor, "__self__", None)
+            if owner is not None:
+                owner.current_step = "Importance scoring"
+                print(f"STEP_START Importance scoring total={len(leave_1_texts)}")
+        except Exception:
+            pass
         leave_1_probs = predictor(leave_1_texts, batch_size=batch_size)
         num_queries += len(leave_1_texts)
         leave_1_probs_argmax = torch.argmax(leave_1_probs, dim=-1)
@@ -262,6 +347,14 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
         num_changed = 0
         for idx, synonyms in synonyms_all:
             new_texts = [text_prime[:idx] + [synonym] + text_prime[min(idx + 1, len_text):] for synonym in synonyms]
+            # Substep: synonym evaluation at position
+            try:
+                owner = getattr(predictor, "__self__", None)
+                if owner is not None:
+                    owner.current_step = f"Synonym evaluation@{idx}"
+                    print(f"STEP_START Synonym evaluation@{idx} total={len(new_texts)}")
+            except Exception:
+                pass
             new_probs = predictor(new_texts, batch_size=batch_size)
 
             # 计算语义相似度（滑动窗口），用于过滤低相似的替换
@@ -305,6 +398,14 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
                     text_prime[idx] = synonyms[new_label_prob_argmin]
                     num_changed += 1
             text_cache = text_prime[:]
+        # Substep: final evaluation
+        try:
+            owner = getattr(predictor, "__self__", None)
+            if owner is not None:
+                owner.current_step = "Final evaluation"
+                print("STEP_START Final evaluation total=1")
+        except Exception:
+            pass
         return ' '.join(text_prime), num_changed, orig_label, torch.argmax(predictor([text_prime])), num_queries
 
 
@@ -318,6 +419,14 @@ def random_attack(text_ls, true_label, predictor, perturb_ratio, stop_words_set,
     返回与 `attack` 相同的五元组。
     """
     # 先检查原始文本的预测结果
+    # Substep: original prediction check
+    try:
+        owner = getattr(predictor, "__self__", None)
+        if owner is not None:
+            owner.current_step = "Check original prediction"
+            print("STEP_START Check original prediction total=1")
+    except Exception:
+        pass
     orig_probs = predictor([text_ls]).squeeze()
     orig_label = torch.argmax(orig_probs)
     orig_prob = orig_probs.max()
@@ -353,6 +462,14 @@ def random_attack(text_ls, true_label, predictor, perturb_ratio, stop_words_set,
         num_changed = 0
         for idx, synonyms in synonyms_all:
             new_texts = [text_prime[:idx] + [synonym] + text_prime[min(idx + 1, len_text):] for synonym in synonyms]
+            # Substep: synonym evaluation at position
+            try:
+                owner = getattr(predictor, "__self__", None)
+                if owner is not None:
+                    owner.current_step = f"Synonym evaluation@{idx}"
+                    print(f"STEP_START Synonym evaluation@{idx} total={len(new_texts)}")
+            except Exception:
+                pass
             new_probs = predictor(new_texts, batch_size=batch_size)
 
             # compute semantic similarity
@@ -396,6 +513,14 @@ def random_attack(text_ls, true_label, predictor, perturb_ratio, stop_words_set,
                     text_prime[idx] = synonyms[new_label_prob_argmin]
                     num_changed += 1
             text_cache = text_prime[:]
+        # Substep: final evaluation
+        try:
+            owner = getattr(predictor, "__self__", None)
+            if owner is not None:
+                owner.current_step = "Final evaluation"
+                print("STEP_START Final evaluation total=1")
+        except Exception:
+            pass
         return ' '.join(text_prime), num_changed, orig_label, torch.argmax(predictor([text_prime])), num_queries
 
 
@@ -463,6 +588,13 @@ def main():
                         default=32,
                         type=int,
                         help="Batch size to get prediction")
+    parser.add_argument("--auto_gpu",
+                        action='store_true',
+                        help="Enable auto GPU batch-size tuning to maximize memory usage")
+    parser.add_argument("--gpu_fill_target",
+                        default=0.9,
+                        type=float,
+                        help="Target fraction of free GPU memory to fill with batch size (0-1)")
     parser.add_argument("--data_size",
                         default=1000,
                         type=int,
@@ -500,7 +632,12 @@ def main():
         checkpoint = torch.load(args.target_model_path, map_location='cuda:0')
         model.load_state_dict(checkpoint)
     elif args.target_model == 'bert':
-        model = NLI_infer_BERT(args.target_model_path, nclasses=args.nclasses, max_seq_length=args.max_seq_length)
+        model = NLI_infer_BERT(args.target_model_path,
+                               nclasses=args.nclasses,
+                               max_seq_length=args.max_seq_length,
+                               batch_size=args.batch_size,
+                               auto_gpu=args.auto_gpu,
+                               gpu_fill_target=args.gpu_fill_target)
     predictor = model.text_pred
     print("Model built!")
 
@@ -521,7 +658,10 @@ def main():
     if args.counter_fitting_cos_sim_path:
         # load pre-computed cosine similarity matrix if provided
         print('Load pre-computed cosine similarity matrix from {}'.format(args.counter_fitting_cos_sim_path))
-        cos_sim = np.load(args.counter_fitting_cos_sim_path)
+        try:
+            cos_sim = np.load(args.counter_fitting_cos_sim_path, mmap_mode='r')
+        except Exception:
+            cos_sim = np.load(args.counter_fitting_cos_sim_path)
     else:
         # calculate the cosine similarity matrix
         print('Start computing the cosine similarity matrix!')
