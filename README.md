@@ -105,7 +105,7 @@ vocab.txt
 
 ## 🔁 4. 预计算词向量相似度矩阵（可选）
 
-若使用 `counter-fitted-vectors.txt`，可提前计算余弦相似度矩阵，节省攻击计算时间：
+若使用 [counter-fitted-vectors.txt](https://drive.google.com/open?id=1bayGomljWb6HeYDMTDKXrh0HackKtSlx)，可提前计算余弦相似度矩阵，节省攻击计算时间：
 
 ```bash
 python comp_cos_sim_mat.py ./Embeddings/counter-fitted-vectors.txt
