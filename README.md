@@ -257,9 +257,10 @@ tf.compat.v1.disable_eager_execution()
 ## 💻 改进
 
 本项目在原项目的基础上进行了一些改进，包括但不限于：
-- 适配新版 TensorFlow 与 PyTorch 依赖
+- 适配新版 TensorFlow 与 PyTorch 依赖，减少版本冲突
 - 优化代码结构，提高GPU使用率，推理改为“按块处理”，避免一次性构造整个数据集的 TensorDataset ，减少CPU/磁盘负担
 - 可视化进度窗口
+
 ## ✅ 致谢
 
 本项目基于[TextFooler代码](https://github.com/jind11/TextFooler)修改优化，适配新版依赖与环境。欢迎在原项目基础上进行二次开发或复现实验结果。
