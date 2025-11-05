@@ -255,7 +255,7 @@ tf.compat.v1.disable_eager_execution()
 
 ## ✅ 致谢
 
-本项目基于官方 TextFooler 代码修改优化，适配新版依赖与环境。欢迎在原项目基础上进行二次开发或复现实验结果。
+本项目基于[TextFooler代码](https://github.com/jind11/TextFooler)修改优化，适配新版依赖与环境。欢迎在原项目基础上进行二次开发或复现实验结果。
  
  方法与结果参考以论文： Jin, Di, et al. "[Is BERT Really Robust? Natural Language Attack on Text Classification and Entailment](https://arxiv.org/pdf/1907.11932.pdf)." arXiv preprint arXiv:1907.11932 (2019)
 
