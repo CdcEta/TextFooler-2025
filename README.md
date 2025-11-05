@@ -150,6 +150,7 @@ TextFooler/
 ├── attack_nli.py                   # NLI（句对）攻击主脚本
 ├── train_classifier.py             # 训练单句分类器（LSTM/CNN）
 ├── comp_cos_sim_mat.py             # 生成 counter-fitted 相似度矩阵
+├── panel_runner_gui.py             # GUI显示实时内容
 ├── dataloader.py                   # 数据加载 / pad / batch 化
 ├── modules.py                      # 模型模块（Embedding、CNN、LSTM 等）
 ├── criteria.py                     # 语义/POS/时态约束工具
@@ -253,6 +254,12 @@ tf.compat.v1.disable_eager_execution()
 | `tf.global_variables_initializer()` | `tf.compat.v1.global_variables_initializer()` | 
 ---
 
+## 💻 改进
+
+本项目在原项目的基础上进行了一些改进，包括但不限于：
+- 适配新版 TensorFlow 与 PyTorch 依赖
+- 优化代码结构，提高GPU使用率，推理改为“按块处理”，避免一次性构造整个数据集的 TensorDataset ，减少CPU/磁盘负担
+- 可视化进度窗口
 ## ✅ 致谢
 
 本项目基于[TextFooler代码](https://github.com/jind11/TextFooler)修改优化，适配新版依赖与环境。欢迎在原项目基础上进行二次开发或复现实验结果。
