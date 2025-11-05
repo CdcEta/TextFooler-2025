@@ -244,9 +244,13 @@ TensorFlow 1.x API 在 2.x 环境不兼容，需修改代码：
 import tensorflow as tf
 tf.compat.v1.disable_eager_execution()
 ```
-
-并将所有 TF1 API 替换为 `tf.compat.v1.xxx`
-
+如下接口已经被移到 tf.compat.v1 下，修改tf.OldAPI为tf.compat.v1.OldAPI，如下
+| 原接口 | 新接口 |
+|------|--------|
+| `tf.Session()` | `tf.compat.v1.Session()` | 
+| `tf.placeholder()` | `tf.compat.v1.placeholder()` | 
+| `tf.ConfigProto()` | `tf.compat.v1.ConfigProto()` | 
+| `tf.global_variables_initializer()` | `tf.compat.v1.global_variables_initializer()` | 
 ---
 
 ## ✅ 致谢
