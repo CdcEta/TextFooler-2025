@@ -1,0 +1,43 @@
+# Core dependencies
+absl-py==2.1.0
+astor==0.8.1
+beautifulsoup4==4.9.1
+boto3==1.14.7
+botocore==1.17.7
+certifi==2020.4.5.2
+chardet==3.0.4
+click==7.1.2
+docutils==0.15.2
+feedparser==6.0.10
+gast==0.4.0
+grpcio==1.51.1               # higher version for TF2.10 compatibility
+h5py==3.8.0                  # required by TF2, supports Python 3.10
+idna==2.9
+importlib-metadata==1.6.1
+jmespath==0.10.0
+joblib==0.15.1
+Keras-Applications==1.0.8
+Keras-Preprocessing==1.1.2
+lxml==4.9.2
+Markdown==3.3.7
+nltk==3.5
+numpy==1.23.5                # max version for TF 2.10.1
+protobuf==3.19.6             # TF2.10 required upper bound
+python-dateutil==2.8.1
+python-docx==0.8.10
+regex==2020.6.8
+requests==2.24.0
+s3transfer==0.3.3
+six==1.15.0
+soupsieve==2.0.1
+tensorboard==2.10.1
+tensorflow-gpu==2.10.1
+tensorflow-hub==0.12.0
+termcolor==2.1.1
+torch==1.13.1                # lower version compatible with Python 3.10
+tqdm==4.46.1
+urllib3==1.25.9
+Werkzeug==2.2.3
+zipp==3.1.0
+#python=3.10
+transformers==4.33.3

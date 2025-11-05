@@ -1,0 +1,9 @@
+Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple
+Collecting scikit-learn
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/1e/37/57198cbb6ea88b20f78dc6019296ebf2ada76fa258ad010452f7c91d43f7/scikit_learn-0.24.2-cp36-cp36m-win_amd64.whl (6.8 MB)
+Requirement already satisfied: threadpoolctl>=2.0.0 in d:\anaconda3\envs\textfooler\lib\site-packages (from scikit-learn) (3.1.0)
+Requirement already satisfied: scipy>=0.19.1 in d:\anaconda3\envs\textfooler\lib\site-packages (from scikit-learn) (1.5.4)
+Requirement already satisfied: joblib>=0.11 in d:\anaconda3\envs\textfooler\lib\site-packages (from scikit-learn) (0.15.1)
+Requirement already satisfied: numpy>=1.13.3 in d:\anaconda3\envs\textfooler\lib\site-packages (from scikit-learn) (1.19.0)
+Installing collected packages: scikit-learn
+Successfully installed scikit-learn-0.24.2

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="SshConfigs">
+    <configs>
+      <sshConfig authType="PASSWORD" connectionConfig="{&quot;serverAliveInterval&quot;:300}" host="gray.csail.mit.edu" id="d7ed8dba-1410-4370-a212-91ae59bab322" port="22" customName="gray" nameFormat="CUSTOM" useOpenSSHConfig="true">
+        <option name="customName" value="gray" />
+      </sshConfig>
+    </configs>
+  </component>
+</project>
