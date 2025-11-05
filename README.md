@@ -212,7 +212,7 @@ TextFooler/
 │   ├── .DS_Store
 │   └── setup.py
 │
-└── tf_cache/                       # USE（Universal Sentence Encoder）缓存目录
+└── USE_cache_path/                       # USE（Universal Sentence Encoder）缓存目录
 ```
 
 ---
