@@ -149,9 +149,7 @@ TextFooler/
 ├── attack_classification.py        # 单句分类攻击主脚本
 ├── attack_nli.py                   # NLI（句对）攻击主脚本
 ├── train_classifier.py             # 训练单句分类器（LSTM/CNN）
-├── run_attack_classification.py    # 启动/示例脚本（分类攻击）
-├── run_attack_nli.py               # 启动/示例脚本（NLI攻击）
-├── comp_cos_sim_mat.py             # 生成 counter-fitted 相似度矩阵（或修改为 Top-K）
+├── comp_cos_sim_mat.py             # 生成 counter-fitted 相似度矩阵
 ├── dataloader.py                   # 数据加载 / pad / batch 化
 ├── modules.py                      # 模型模块（Embedding、CNN、LSTM 等）
 ├── criteria.py                     # 语义/POS/时态约束工具
