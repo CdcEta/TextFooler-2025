@@ -220,7 +220,7 @@ TextFooler/
 ## 🛠️ 常见问题记录
 
 ### 1. `pattern.en` 导入失败
-将 `from pattern.en import ...` 修改为 `from pattern.text.en import ...`。
+从github上下载[pattern](https://github.com/clips/pattern) 项目，将 `from pattern.en import ...` 修改为 `from pattern.text.en import ...`。
 
 ### 2. NLTK 资源缺失
 
@@ -229,7 +229,7 @@ import nltk
 nltk.download(['punkt', 'averaged_perceptron_tagger', 'universal_tagset', 'wordnet', 'omw-1.4'])
 ```
 
-⚠️ 若 `wordnet` 下载失败，手动放置语料包到：
+⚠️ 若 `wordnet` 下载失败，直接下载[nltk数据资源](https://github.com/nltk/nltk_data?tab=readme-ov-file)然后手动放置语料包到：
 `C:\Users\username\AppData\Roaming\nltk_data\corpora`
 
 ### 3. CUDA 报错
