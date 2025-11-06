@@ -25,7 +25,7 @@ class RunnerGUI:
         self.proc = None
         self.root = tk.Tk()
         self.root.title('TextFooler Attack Runner')
-        self.root.geometry('640x240')
+        self.root.geometry('800x420')
         self._build_ui()
         self.current_task = '-'
         self.progress_current = 0
@@ -37,32 +37,47 @@ class RunnerGUI:
         frm = ttk.Frame(self.root)
         frm.pack(fill='both', expand=True)
 
+        frm.columnconfigure(0, weight=1)
+
         self.lbl_cuda = ttk.Label(frm, text=f'CUDA: {"Enabled" if CUDA_ENABLED else "Disabled"}', font=('Segoe UI', 11))
         self.lbl_cuda.grid(row=0, column=0, sticky='w', **pad)
 
+        # Hardware info (stacked vertically to avoid overflow)
+        self.lbl_cpu = ttk.Label(frm, text='CPU: -', font=('Segoe UI', 10))
+        self.lbl_cpu.grid(row=1, column=0, sticky='w', **pad)
+        self.lbl_gpu = ttk.Label(frm, text='GPU: -', font=('Segoe UI', 10))
+        self.lbl_gpu.grid(row=2, column=0, sticky='w', **pad)
+
         self.lbl_task = ttk.Label(frm, text='Task: -', font=('Segoe UI', 11))
-        self.lbl_task.grid(row=1, column=0, sticky='w', **pad)
+        self.lbl_task.grid(row=3, column=0, sticky='w', **pad)
 
         self.lbl_prog = ttk.Label(frm, text='Progress: 0 / 0 (0%)', font=('Segoe UI', 10))
-        self.lbl_prog.grid(row=2, column=0, sticky='w', **pad)
+        self.lbl_prog.grid(row=4, column=0, sticky='w', **pad)
 
-        self.bar = ttk.Progressbar(frm, orient='horizontal', length=600, mode='determinate')
-        self.bar.grid(row=3, column=0, sticky='we', **pad)
+        self.bar = ttk.Progressbar(frm, orient='horizontal', mode='determinate')
+        self.bar.grid(row=5, column=0, sticky='we', **pad)
 
         # Sub-step
         self.lbl_sub = ttk.Label(frm, text='Step: -', font=('Segoe UI', 10))
-        self.lbl_sub.grid(row=4, column=0, sticky='w', **pad)
+        self.lbl_sub.grid(row=6, column=0, sticky='w', **pad)
 
         self.lbl_subprog = ttk.Label(frm, text='Step Progress: 0 / 0 (0%)', font=('Segoe UI', 9))
-        self.lbl_subprog.grid(row=5, column=0, sticky='w', **pad)
+        self.lbl_subprog.grid(row=7, column=0, sticky='w', **pad)
 
-        self.bar2 = ttk.Progressbar(frm, orient='horizontal', length=600, mode='determinate')
-        self.bar2.grid(row=6, column=0, sticky='we', **pad)
+        self.bar2 = ttk.Progressbar(frm, orient='horizontal', mode='determinate')
+        self.bar2.grid(row=8, column=0, sticky='we', **pad)
 
-        self.txt = tk.Text(frm, height=6)
-        self.txt.grid(row=7, column=0, sticky='nsew', **pad)
-        frm.rowconfigure(7, weight=1)
-        frm.columnconfigure(0, weight=1)
+        # Tuned params
+        self.lbl_params = ttk.Label(frm, text='Params: -', font=('Segoe UI', 9))
+        self.lbl_params.grid(row=9, column=0, sticky='w', **pad)
+
+        # Log with scrollbar
+        self.txt = tk.Text(frm, height=10, wrap='word')
+        self.txt.grid(row=10, column=0, sticky='nsew', **pad)
+        scroll = ttk.Scrollbar(frm, orient='vertical', command=self.txt.yview)
+        scroll.grid(row=10, column=1, sticky='ns', **pad)
+        self.txt.configure(yscrollcommand=scroll.set)
+        frm.rowconfigure(10, weight=1)
 
     def _append_log(self, line: str):
         self.txt.insert('end', line + '\n')
@@ -116,6 +131,38 @@ class RunnerGUI:
             cur = int(m.group(1))
             tot = int(m.group(2))
             self._update_progress(cur, tot)
+        # Hardware and tuning markers
+        if s.startswith('HW_CPU '):
+            m = re.match(r'^HW_CPU\s+name=(.+)\s+logical=(\d+)', s)
+            if m:
+                name = m.group(1)
+                logical = m.group(2)
+                self.lbl_cpu.config(text=f'CPU: {name} ({logical} threads)')
+        elif s.startswith('HW_GPU '):
+            m = re.match(r'^HW_GPU\s+name=(.+)\s+mem_gb=([0-9.]+)\s+cc=(.+)', s)
+            if m:
+                name = m.group(1)
+                mem = m.group(2)
+                cc = m.group(3)
+                self.lbl_gpu.config(text=f'GPU: {name} ({mem} GB, cc {cc})')
+        elif s.startswith('TUNING '):
+            self.lbl_params.config(text=f'Params: {s[7:]}')
+        # Hardware and tuning markers
+        if s.startswith('HW_CPU '):
+            m = re.match(r'^HW_CPU\s+name=(.+)\s+logical=(\d+)', s)
+            if m:
+                name = m.group(1)
+                logical = m.group(2)
+                self.lbl_cpu.config(text=f'CPU: {name} ({logical} threads)')
+        elif s.startswith('HW_GPU '):
+            m = re.match(r'^HW_GPU\s+name=(.+)\s+mem_gb=([0-9.]+)\s+cc=(.+)', s)
+            if m:
+                name = m.group(1)
+                mem = m.group(2)
+                cc = m.group(3)
+                self.lbl_gpu.config(text=f'GPU: {name} ({mem} GB, cc {cc})')
+        elif s.startswith('TUNING '):
+            self.lbl_params.config(text=f'Params: {s[7:]}')
         # Sub-step markers
         if s.startswith('STEP_START '):
             # e.g., STEP_START Importance scoring total=100

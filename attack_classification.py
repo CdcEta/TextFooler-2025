@@ -7,6 +7,8 @@ import dataloader
 from train_classifier import Model
 import criteria
 import random
+import platform
+import subprocess
 
 import tensorflow as tf
 tf.compat.v1.disable_eager_execution()
@@ -83,7 +85,10 @@ class NLI_infer_BERT(nn.Module):
                  max_seq_length=128,
                  batch_size=32,
                  auto_gpu=False,
-                 gpu_fill_target=0.9):
+                 gpu_fill_target=0.9,
+                 num_workers=2,
+                 prefetch_factor=2,
+                 fp16=False):
         super(NLI_infer_BERT, self).__init__()
         self.model = BertForSequenceClassification.from_pretrained(pretrained_dir, num_labels=nclasses).cuda()
 
@@ -91,6 +96,9 @@ class NLI_infer_BERT(nn.Module):
         self.dataset = NLIDataset_BERT(pretrained_dir, max_seq_length=max_seq_length, batch_size=batch_size)
         self.auto_gpu = auto_gpu
         self.gpu_fill_target = gpu_fill_target
+        self.num_workers = num_workers
+        self.prefetch_factor = prefetch_factor
+        self.fp16 = fp16
         self.current_step = "-"
 
     def _tune_batch_size(self, text_data, init_bs):
@@ -153,28 +161,84 @@ class NLI_infer_BERT(nn.Module):
         total_items = len(text_data)
         processed = 0
         probs_all = []
+
+        # CUDA stream for prefetch to overlap H2D copy with compute
+        prefetch_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+        cur_ids = cur_mask = cur_seg = None
         i = 0
         while i < total_items:
             bs = min(effective_bs, total_items - i)
             chunk = text_data[i:i+bs]
             try:
+                # build CPU tensors (pinned for faster H2D)
                 feats = self.dataset.convert_examples_to_features(chunk, self.dataset.max_seq_length, self.dataset.tokenizer)
-                input_ids = torch.tensor([f.input_ids for f in feats], dtype=torch.long).cuda(non_blocking=True)
-                input_mask = torch.tensor([f.input_mask for f in feats], dtype=torch.long).cuda(non_blocking=True)
-                segment_ids = torch.tensor([f.segment_ids for f in feats], dtype=torch.long).cuda(non_blocking=True)
-                with torch.no_grad():
-                    logits = self.model(input_ids, segment_ids, input_mask)
-                    probs = nn.functional.softmax(logits, dim=-1)
-                    probs_all.append(probs)
-                processed += bs
-                print(f"STEP_PROGRESS {self.current_step} {processed}/{total_items}")
+                ids_cpu = torch.tensor([f.input_ids for f in feats], dtype=torch.long).pin_memory()
+                msk_cpu = torch.tensor([f.input_mask for f in feats], dtype=torch.long).pin_memory()
+                seg_cpu = torch.tensor([f.segment_ids for f in feats], dtype=torch.long).pin_memory()
+
+                # move next batch to GPU on prefetch stream
+                if prefetch_stream is not None:
+                    with torch.cuda.stream(prefetch_stream):
+                        next_ids = ids_cpu.to(device='cuda', non_blocking=True)
+                        next_mask = msk_cpu.to(device='cuda', non_blocking=True)
+                        next_seg = seg_cpu.to(device='cuda', non_blocking=True)
+                else:
+                    next_ids = ids_cpu.to(device='cuda', non_blocking=True)
+                    next_mask = msk_cpu.to(device='cuda', non_blocking=True)
+                    next_seg = seg_cpu.to(device='cuda', non_blocking=True)
+
+                # compute current batch if available
+                if cur_ids is not None:
+                    if prefetch_stream is not None:
+                        torch.cuda.current_stream().wait_stream(prefetch_stream)
+                    free_before, total_mem = torch.cuda.mem_get_info()
+                    with torch.inference_mode():
+                        if self.fp16:
+                            with torch.cuda.amp.autocast():
+                                logits = self.model(cur_ids, cur_seg, cur_mask)
+                        else:
+                            logits = self.model(cur_ids, cur_seg, cur_mask)
+                        probs = nn.functional.softmax(logits, dim=-1)
+                        probs_all.append(probs)
+                    free_after, total_mem2 = torch.cuda.mem_get_info()
+                    processed += cur_ids.size(0)
+                    print(f"STEP_PROGRESS {self.current_step} {processed}/{total_items}")
+                    # adapt next batch size by memory usage ratio
+                    if self.auto_gpu:
+                        used_ratio = 1.0 - (free_after / float(total_mem2))
+                        target = float(self.gpu_fill_target)
+                        growth, backoff = 1.2, 0.5
+                        if used_ratio < target * 0.95:
+                            effective_bs = max(1, min(4096, int(effective_bs * growth)))
+                            print(f"[AutoGPU] Increase batch size -> {effective_bs} (mem_ratio={used_ratio:.2f})")
+                        elif used_ratio > target * 1.05:
+                            effective_bs = max(1, int(effective_bs * backoff))
+                            print(f"[AutoGPU] Decrease batch size -> {effective_bs} (mem_ratio={used_ratio:.2f})")
+
+                # swap buffers and advance
+                cur_ids, cur_mask, cur_seg = next_ids, next_mask, next_seg
                 i += bs
             except RuntimeError as e:
                 if 'out of memory' in str(e).lower():
                     torch.cuda.empty_cache()
                     effective_bs = max(1, bs // 2)
+                    print(f"[AutoGPU] OOM, backoff batch size -> {effective_bs}")
                 else:
                     raise
+
+        # compute the last prefetched batch
+        if cur_ids is not None:
+            free_before, total_mem = torch.cuda.mem_get_info()
+            with torch.inference_mode():
+                if self.fp16:
+                    with torch.cuda.amp.autocast():
+                        logits = self.model(cur_ids, cur_seg, cur_mask)
+                else:
+                    logits = self.model(cur_ids, cur_seg, cur_mask)
+                probs = nn.functional.softmax(logits, dim=-1)
+                probs_all.append(probs)
+            processed += cur_ids.size(0)
+            print(f"STEP_PROGRESS {self.current_step} {processed}/{total_items}")
         print(f"STEP_DONE {self.current_step}")
         return torch.cat(probs_all, dim=0)
 
@@ -595,6 +659,17 @@ def main():
                         default=0.9,
                         type=float,
                         help="Target fraction of free GPU memory to fill with batch size (0-1)")
+    parser.add_argument("--num_workers",
+                        default=2,
+                        type=int,
+                        help="Number of DataLoader workers for CPU tokenization/prep")
+    parser.add_argument("--prefetch_factor",
+                        default=2,
+                        type=int,
+                        help="Prefetch batches per worker (requires num_workers>0)")
+    parser.add_argument("--fp16",
+                        action='store_true',
+                        help="Enable FP16 autocast inference to increase throughput (may allow larger batch)")
     parser.add_argument("--data_size",
                         default=1000,
                         type=int,
@@ -614,6 +689,63 @@ def main():
         print("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     else:
         os.makedirs(args.output_dir, exist_ok=True)
+
+    # Detect hardware and auto-tune params (only override defaults)
+    def _get_cpu_name():
+        try:
+            if os.name == 'nt':
+                out = subprocess.check_output(['wmic', 'cpu', 'get', 'Name'], text=True, stderr=subprocess.DEVNULL)
+                lines = [l.strip() for l in out.splitlines() if l.strip() and 'Name' not in l]
+                if lines:
+                    return lines[0]
+        except Exception:
+            pass
+        try:
+            return platform.processor() or platform.uname().processor or 'Unknown CPU'
+        except Exception:
+            return 'Unknown CPU'
+
+    cpu_logical = os.cpu_count() or 1
+    cpu_name = _get_cpu_name()
+
+    gpu_name = 'None'
+    gpu_mem_gb = 0.0
+    cc = 'N/A'
+    if torch.cuda.is_available():
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+            props = torch.cuda.get_device_properties(0)
+            gpu_mem_gb = float(props.total_memory) / (1024**3)
+            cc = f"{props.major}.{props.minor}"
+        except Exception:
+            pass
+
+    # Recommended params based on hardware
+    rec_workers = max(4, min(12, cpu_logical // 2))
+    rec_prefetch = 3
+    rec_fp16 = torch.cuda.is_available()
+    rec_gft = 0.9 if gpu_mem_gb <= 4.5 else 0.95
+    rec_msl = 256 if gpu_mem_gb >= 4.0 else args.max_seq_length
+
+    # Override only if user kept defaults
+    if getattr(args, 'num_workers', 2) == 2:
+        args.num_workers = rec_workers
+    if getattr(args, 'prefetch_factor', 2) == 2:
+        args.prefetch_factor = rec_prefetch
+    if not getattr(args, 'fp16', False) and rec_fp16:
+        args.fp16 = True
+    if getattr(args, 'gpu_fill_target', 0.9) == 0.9:
+        args.gpu_fill_target = rec_gft
+    if getattr(args, 'max_seq_length', 128) == 128:
+        args.max_seq_length = rec_msl
+
+    # Print for GUI parsing
+    print(f"HW_CPU name={cpu_name} logical={cpu_logical}")
+    print(f"HW_GPU name={gpu_name} mem_gb={gpu_mem_gb:.1f} cc={cc}")
+    print(
+        f"TUNING auto_gpu={args.auto_gpu} num_workers={args.num_workers} prefetch_factor={args.prefetch_factor} "
+        f"fp16={args.fp16} max_seq_length={args.max_seq_length} gpu_fill_target={args.gpu_fill_target}"
+    )
 
     # get data to attack
     texts, labels = dataloader.read_corpus(args.dataset_path)
@@ -637,7 +769,10 @@ def main():
                                max_seq_length=args.max_seq_length,
                                batch_size=args.batch_size,
                                auto_gpu=args.auto_gpu,
-                               gpu_fill_target=args.gpu_fill_target)
+                               gpu_fill_target=args.gpu_fill_target,
+                               num_workers=getattr(args, 'num_workers', 2),
+                               prefetch_factor=getattr(args, 'prefetch_factor', 2),
+                               fp16=getattr(args, 'fp16', False))
     predictor = model.text_pred
     print("Model built!")
 
