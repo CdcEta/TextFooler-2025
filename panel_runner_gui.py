@@ -27,6 +27,15 @@ class RunnerGUI:
         self.root.title('TextFooler Attack Runner')
         self.root.geometry('800x420')
         self._build_ui()
+        # Emit GPU/CPU info at startup
+        try:
+            self._emit_gpu_info()
+        except Exception as e:
+            try:
+                print('GPU_INFO startup error:', e)
+            except Exception:
+                pass
+            self._append_log('GPU_INFO startup error: ' + str(e))
         self.current_task = '-'
         self.progress_current = 0
         self.progress_total = 0
@@ -185,6 +194,73 @@ class RunnerGUI:
                 name = m.group(1)
                 # mark done
                 self._update_substep(name, self.bar2['maximum'], self.bar2['maximum'])
+
+    def _emit_gpu_info(self):
+        """Print GPU availability and counts, referencing TensorFlow_test outputs."""
+        lines = []
+        # Torch info
+        try:
+            import torch as _torch
+            torch_avail = _torch.cuda.is_available()
+            torch_count = _torch.cuda.device_count() if torch_avail else 0
+            lines.append(f"GPU_INFO Torch CUDA available: {torch_avail}")
+            lines.append(f"GPU_INFO Torch Num GPUs Available: {torch_count}")
+            for i in range(torch_count):
+                try:
+                    name = _torch.cuda.get_device_name(i)
+                    lines.append(f"GPU_INFO Torch GPU[{i}] name: {name}")
+                except Exception:
+                    pass
+        except Exception as e:
+            lines.append(f"GPU_INFO Torch not available: {e}")
+
+        # TensorFlow info
+        try:
+            import tensorflow as tf
+            tf_version = getattr(tf, '__version__', 'unknown')
+            lines.append(f"GPU_INFO TF Version: {tf_version}")
+            try:
+                dev_name = tf.test.gpu_device_name()
+                lines.append(f"GPU_INFO TF gpu_device_name(): {dev_name}")
+            except Exception as e1:
+                lines.append(f"GPU_INFO TF gpu_device_name() error: {e1}")
+            try:
+                phys_gpus = tf.config.list_physical_devices('GPU')
+                lines.append(f"GPU_INFO TF Physical GPUs: {phys_gpus}")
+                lines.append(f"GPU_INFO TF Num GPUs Available: {len(phys_gpus)}")
+            except Exception as e2:
+                lines.append(f"GPU_INFO TF Physical GPUs error: {e2}")
+            try:
+                is_avail = tf.test.is_gpu_available()
+                lines.append(f"GPU_INFO TF is_gpu_available(): {is_avail}")
+            except Exception as e3:
+                lines.append(f"GPU_INFO TF is_gpu_available() error: {e3}")
+        except Exception as e:
+            lines.append(f"GPU_INFO TF not available: {e}")
+
+        # Emit to console and GUI log
+        for ln in lines:
+            try:
+                print(ln)
+            except Exception:
+                pass
+            self._append_log(ln)
+
+        # Update CUDA label with GPU count (prefer torch, fallback to tf)
+        gpu_count = 0
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                gpu_count = _torch.cuda.device_count()
+        except Exception:
+            pass
+        if gpu_count == 0:
+            try:
+                import tensorflow as tf
+                gpu_count = len(tf.config.list_physical_devices('GPU'))
+            except Exception:
+                gpu_count = 0
+        self.lbl_cuda.config(text=f'CUDA: {"Enabled" if CUDA_ENABLED else "Disabled"} (GPUs: {gpu_count})')
 
     def _reader(self):
         with self.proc.stdout:

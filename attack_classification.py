@@ -2,6 +2,8 @@
 # 关键步骤：词重要性计算、同义词检索、USE 语义相似度过滤、词性约束（POS）。
 import argparse
 import os
+# Suppress verbose TensorFlow logs (INFO/WARNING) to reduce GPU DLL noise
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 import numpy as np
 import dataloader
 from train_classifier import Model
@@ -35,22 +37,48 @@ class USE(object):
         super(USE, self).__init__()
         os.environ['TFHUB_CACHE_DIR'] = cache_path
         module_url = "https://tfhub.dev/google/universal-sentence-encoder-large/3"
-        self.embed = hub.Module(module_url)
+        # Prefer GPU if available; enable memory growth to avoid OOM at init
+        device = "/CPU:0"
+        try:
+            gpus = tf.config.list_physical_devices('GPU')
+            if gpus:
+                try:
+                    tf.config.experimental.set_memory_growth(gpus[0], True)
+                except Exception:
+                    pass
+                device = "/GPU:0"
+                print(f"[USE] TensorFlow GPU detected ({gpus[0].name}). Running USE on GPU.")
+            else:
+                print("[USE] No TensorFlow GPU detected. Running USE on CPU.")
+        except Exception:
+            # In TF1 compatibility environments, tf.config may be unavailable; fall back gracefully
+            print("[USE] TensorFlow device query failed; defaulting to CPU.")
         config = tf.compat.v1.ConfigProto()
+        config.allow_soft_placement = True
         config.gpu_options.allow_growth = True
+        self._device = device
+        with tf.device(self._device):
+            self.embed = hub.Module(module_url)
         self.sess = tf.compat.v1.Session(config=config)
         self.build_graph()
         self.sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.tables_initializer()])
 
     def build_graph(self):
-        self.sts_input1 = tf.compat.v1.placeholder(tf.string, shape=(None))
-        self.sts_input2 = tf.compat.v1.placeholder(tf.string, shape=(None))
+        with tf.device(self._device):
+            self.sts_input1 = tf.compat.v1.placeholder(tf.string, shape=(None))
+            self.sts_input2 = tf.compat.v1.placeholder(tf.string, shape=(None))
 
-        sts_encode1 = tf.nn.l2_normalize(self.embed(self.sts_input1), axis=1)
-        sts_encode2 = tf.nn.l2_normalize(self.embed(self.sts_input2), axis=1)
-        self.cosine_similarities = tf.reduce_sum(tf.multiply(sts_encode1, sts_encode2), axis=1)
-        clip_cosine_similarities = tf.clip_by_value(self.cosine_similarities, -1.0, 1.0)
-        self.sim_scores = 1.0 - tf.acos(clip_cosine_similarities)
+            sts_encode1 = tf.nn.l2_normalize(self.embed(self.sts_input1), axis=1)
+            sts_encode2 = tf.nn.l2_normalize(self.embed(self.sts_input2), axis=1)
+            self.cosine_similarities = tf.reduce_sum(tf.multiply(sts_encode1, sts_encode2), axis=1)
+            clip_cosine_similarities = tf.clip_by_value(self.cosine_similarities, -1.0, 1.0)
+            self.sim_scores = 1.0 - tf.acos(clip_cosine_similarities)
+            # Raw embedding op for caching-based batched embedding
+            self.raw_input = tf.compat.v1.placeholder(tf.string, shape=(None))
+            self.raw_encode = tf.nn.l2_normalize(self.embed(self.raw_input), axis=1)
+        # Simple embedding cache to avoid recompute on identical windows
+        self._emb_cache = {}
+        self._emb_cache_max = 10000
 
     def semantic_sim(self, sents1, sents2):
         scores = self.sess.run(
@@ -59,6 +87,49 @@ class USE(object):
                 self.sts_input1: sents1,
                 self.sts_input2: sents2,
             })
+        return scores
+
+    def semantic_sim_cached(self, sents1, sents2, batch_size=512):
+        """Compute semantic similarity using cached embeddings to reduce redundant TFHub calls.
+
+        - Embeds unique strings only once, caches results.
+        - Computes cosine similarity and converts to the same score space as semantic_sim.
+        """
+        # Collect unique strings
+        uniq = []
+        seen = set()
+        for s in sents1:
+            if s not in seen:
+                uniq.append(s)
+                seen.add(s)
+        for s in sents2:
+            if s not in seen:
+                uniq.append(s)
+                seen.add(s)
+
+        # Embed missing strings in chunks
+        missing = [s for s in uniq if s not in self._emb_cache]
+        try:
+            for i in range(0, len(missing), batch_size):
+                chunk = missing[i:i+batch_size]
+                if not chunk:
+                    continue
+                emb = self.sess.run(self.raw_encode, feed_dict={self.raw_input: chunk})
+                for s, v in zip(chunk, emb):
+                    # capacity control
+                    if len(self._emb_cache) >= self._emb_cache_max:
+                        self._emb_cache.clear()
+                    self._emb_cache[s] = v
+        except Exception:
+            # Fallback to original method if embedding fails
+            return self.semantic_sim(sents1, sents2)[0]
+
+        # Build arrays for pairwise cosine similarity
+        e1 = np.stack([self._emb_cache[s] for s in sents1], axis=0)
+        e2 = np.stack([self._emb_cache[s] for s in sents2], axis=0)
+        cos = np.sum(e1 * e2, axis=1)
+        cos = np.clip(cos, -1.0, 1.0)
+        scores = 1.0 - np.arccos(cos)
         return scores
 
 def pick_most_similar_words_batch(src_words, sim_mat, idx2word, ret_count=10, threshold=0.):
@@ -88,9 +159,52 @@ class NLI_infer_BERT(nn.Module):
                  gpu_fill_target=0.9,
                  num_workers=2,
                  prefetch_factor=2,
-                 fp16=False):
+        fp16=False):
         super(NLI_infer_BERT, self).__init__()
-        self.model = BertForSequenceClassification.from_pretrained(pretrained_dir, num_labels=nclasses).cuda()
+
+        # Preferred: use model's from_pretrained API (handles config/weights)
+        try:
+            self.model = BertForSequenceClassification.from_pretrained(pretrained_dir, num_labels=nclasses).cuda()
+            print(f"[ModelLoad] Loaded BertForSequenceClassification from '{pretrained_dir}' with num_labels={nclasses}.")
+        except Exception as e:
+            print(f"[ModelLoad] from_pretrained failed: {e}. Falling back to manual config/weights load.")
+            # Fallback: try reading config json; else default vocab size
+            cfg_path = os.path.join(pretrained_dir, 'bert_config.json')
+            try:
+                config = BertConfig.from_json_file(cfg_path)
+                print(f"[ModelLoad] Loaded config from {cfg_path}.")
+            except Exception as e_cfg:
+                print(f"[ModelLoad] Config json load failed: {e_cfg}. Using default vocab size 30522.")
+                config = BertConfig(30522)
+            self.model = BertForSequenceClassification(config, num_labels=nclasses).cuda()
+            # Try to load weights; ignore classifier shape mismatches
+            sd_path = os.path.join(pretrained_dir, 'pytorch_model.bin')
+            if os.path.exists(sd_path):
+                try:
+                    state_dict = torch.load(sd_path, map_location='cpu')
+                    cw = state_dict.get('classifier.weight')
+                    cb = state_dict.get('classifier.bias')
+                    if cw is not None and hasattr(cw, 'shape') and cw.shape[0] != nclasses:
+                        print(f"[ModelLoad] Drop mismatched classifier.weight {tuple(cw.shape)} for nclasses={nclasses}")
+                        state_dict.pop('classifier.weight', None)
+                    if cb is not None and hasattr(cb, 'shape') and cb.shape[0] != nclasses:
+                        print(f"[ModelLoad] Drop mismatched classifier.bias {tuple(cb.shape)} for nclasses={nclasses}")
+                        state_dict.pop('classifier.bias', None)
+                    self.model.load_state_dict(state_dict, strict=False)
+                    print(f"[ModelLoad] Loaded weights from {sd_path} with strict=False.")
+                except Exception as e_sd:
+                    print(f"[ModelLoad] Warning: failed to load state dict from {sd_path}: {e_sd}")
+            else:
+                print(f"[ModelLoad] Warning: state dict not found at {sd_path}, using randomly initialized weights.")
+
+        # Enable TF32/high precision matmul optimizations when available to speed up transformer ops
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, 'set_float32_matmul_precision'):
+                torch.set_float32_matmul_precision('high')
+        except Exception:
+            pass
 
         # construct dataset loader
         self.dataset = NLIDataset_BERT(pretrained_dir, max_seq_length=max_seq_length, batch_size=batch_size)
@@ -194,7 +308,7 @@ class NLI_infer_BERT(nn.Module):
                     free_before, total_mem = torch.cuda.mem_get_info()
                     with torch.inference_mode():
                         if self.fp16:
-                            with torch.cuda.amp.autocast():
+                            with torch.amp.autocast(device_type='cuda'):
                                 logits = self.model(cur_ids, cur_seg, cur_mask)
                         else:
                             logits = self.model(cur_ids, cur_seg, cur_mask)
@@ -231,7 +345,7 @@ class NLI_infer_BERT(nn.Module):
             free_before, total_mem = torch.cuda.mem_get_info()
             with torch.inference_mode():
                 if self.fp16:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast(device_type='cuda'):
                         logits = self.model(cur_ids, cur_seg, cur_mask)
                 else:
                     logits = self.model(cur_ids, cur_seg, cur_mask)
@@ -434,9 +548,10 @@ def attack(text_ls, true_label, predictor, stop_words_set, word2idx, idx2word, c
             else:
                 text_range_min = 0
                 text_range_max = len_text
-            semantic_sims = \
-            sim_predictor.semantic_sim([' '.join(text_cache[text_range_min:text_range_max])] * len(new_texts),
-                                       list(map(lambda x: ' '.join(x[text_range_min:text_range_max]), new_texts)))[0]
+            ref = ' '.join(text_cache[text_range_min:text_range_max])
+            cand = list(map(lambda x: ' '.join(x[text_range_min:text_range_max]), new_texts))
+            # Cached USE similarity to reduce redundant embedding of identical ref window
+            semantic_sims = sim_predictor.semantic_sim_cached([ref] * len(new_texts), cand)
 
             num_queries += len(new_texts)
             if len(new_probs.shape) < 2:
@@ -549,9 +664,9 @@ def random_attack(text_ls, true_label, predictor, perturb_ratio, stop_words_set,
             else:
                 text_range_min = 0
                 text_range_max = len_text
-            semantic_sims = \
-            sim_predictor.semantic_sim([' '.join(text_cache[text_range_min:text_range_max])] * len(new_texts),
-                                       list(map(lambda x: ' '.join(x[text_range_min:text_range_max]), new_texts)))[0]
+            ref = ' '.join(text_cache[text_range_min:text_range_max])
+            cand = list(map(lambda x: ' '.join(x[text_range_min:text_range_max]), new_texts))
+            semantic_sims = sim_predictor.semantic_sim_cached([ref] * len(new_texts), cand)
 
             num_queries += len(new_texts)
             if len(new_probs.shape) < 2:

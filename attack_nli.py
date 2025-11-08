@@ -183,22 +183,41 @@ class USE(object):
         super(USE, self).__init__()
         os.environ['TFHUB_CACHE_DIR'] = cache_path
         module_url = "https://tfhub.dev/google/universal-sentence-encoder-large/3"
-        self.embed = hub.Module(module_url)
+        # Prefer GPU if available; enable memory growth to avoid OOM at init
+        device = "/CPU:0"
+        try:
+            gpus = tf.config.list_physical_devices('GPU')
+            if gpus:
+                try:
+                    tf.config.experimental.set_memory_growth(gpus[0], True)
+                except Exception:
+                    pass
+                device = "/GPU:0"
+                print(f"[USE] TensorFlow GPU detected ({gpus[0].name}). Running USE on GPU.")
+            else:
+                print("[USE] No TensorFlow GPU detected. Running USE on CPU.")
+        except Exception:
+            print("[USE] TensorFlow device query failed; defaulting to CPU.")
         config = tf.compat.v1.ConfigProto()
+        config.allow_soft_placement = True
         config.gpu_options.allow_growth = True
+        self._device = device
+        with tf.device(self._device):
+            self.embed = hub.Module(module_url)
         self.sess = tf.compat.v1.Session(config=config)
         self.build_graph()
         self.sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.tables_initializer()])
 
     def build_graph(self):
-        self.sts_input1 = tf.compat.v1.placeholder(tf.string, shape=(None))
-        self.sts_input2 = tf.compat.v1.placeholder(tf.string, shape=(None))
+        with tf.device(self._device):
+            self.sts_input1 = tf.compat.v1.placeholder(tf.string, shape=(None))
+            self.sts_input2 = tf.compat.v1.placeholder(tf.string, shape=(None))
 
-        sts_encode1 = tf.compat.v1.nn.l2_normalize(self.embed(self.sts_input1), axis=1)
-        sts_encode2 = tf.compat.v1.nn.l2_normalize(self.embed(self.sts_input2), axis=1)
-        self.cosine_similarities = tf.reduce_sum(tf.multiply(sts_encode1, sts_encode2), axis=1)
-        clip_cosine_similarities = tf.clip_by_value(self.cosine_similarities, -1.0, 1.0)
-        self.sim_scores = 1.0 - tf.acos(clip_cosine_similarities)
+            sts_encode1 = tf.compat.v1.nn.l2_normalize(self.embed(self.sts_input1), axis=1)
+            sts_encode2 = tf.compat.v1.nn.l2_normalize(self.embed(self.sts_input2), axis=1)
+            self.cosine_similarities = tf.reduce_sum(tf.multiply(sts_encode1, sts_encode2), axis=1)
+            clip_cosine_similarities = tf.clip_by_value(self.cosine_similarities, -1.0, 1.0)
+            self.sim_scores = 1.0 - tf.acos(clip_cosine_similarities)
 
     def semantic_sim(self, sents1, sents2):
         scores = self.sess.run(

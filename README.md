@@ -60,6 +60,7 @@ Werkzeug==2.2.3
 zipp==3.1.0
 python==3.10
 transformers==4.33.3
+#CUDA==11.2 & cuDNN==8.x
 ```
 
 详见 `requirements.txt`。
