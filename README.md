@@ -261,11 +261,14 @@ tf.compat.v1.disable_eager_execution()
 - 适配新版 TensorFlow 与 PyTorch 依赖，减少版本冲突
 - 优化代码结构，提高计算效率，改进包括：
 ```
-预取流 + 双缓冲：减少空转，提高 GPU 计算占比。
-改进推理模式：批次推理改为 torch.inference_mode() ，降低调度/内存开销。
-GPU加速：保持 --fp16 自动混合精度与 TF32 （Ampere+），并启用 cudnn.benchmark ，选择更快内核。
-显存动态调批：每批次后读取 torch.cuda.mem_get_info() ，根据显存使用率与目标值动增减下一批大小，并在 OOM 时自动减半重试。
-动态调参：检测 CPU 逻辑线程数和 GPU 显存容量，基于硬件给出推荐参数，包括批次大小、学习率、权重衰减等。
+- 引入 USE.semantic_sim_cached 与字符串级嵌入缓存，显著减少 TFHub 重复调用，降低相似度计算开销。
+- 优化 USE 设备选择与内存策略：自动检测 GPU、 allow_growth 、支持 USE_ON_CPU 环境变量强制跑 CPU。
+- 强化 BERT 加载流程：优先 BertForSequenceClassification.from_pretrained ，失败时回退到 BertConfig + state_dict ，并自动忽略分类头维度不匹配，增加跨数据集/类别数的兼容性。
+- 集成 torch.compile （检测 Triton 可用性），通过 TORCH_COMPILE 环境变量控制；运行期异常自动回退到 eager，避免崩溃。
+- 启用 TF32/高性能 FP32 矩阵乘优化（新旧 API 双分支），在支持的 GPU 上提高推理吞吐与稳定性。
+- 自适应 GPU 批次调优：利用 torch.cuda.mem_get_info() 估算每样本显存占用，首批探测+运行时动态增减 batch_size ，并保留安全余量 reserve_free_ratio 。
+- 推理管线加速：CPU 侧 pin_memory + 非阻塞 GPU 传输（ non_blocking=True ），配合 ThreadPoolExecutor 背景预取下一批特征，实现计算与数据准备并行。
+- 文本特征缓存： NLIDataset_BERT._feat_cache 按 (text, max_seq_length) 缓存 InputFeatures ，避免重复分词与 ID 转换，控制容量上限。
 ```
 - 可视化进度窗口，显示当前处理进度、攻击成功数、攻击失败数等信息，同时展示当前硬件和动态调参信息。
 
