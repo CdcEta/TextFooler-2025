@@ -14,10 +14,7 @@ import random
 import platform
 import subprocess
 
-import tensorflow as tf
-tf.compat.v1.disable_eager_execution()
-
-import tensorflow_hub as hub
+# 移除 TensorFlow 依赖，语义相似度模块改为纯 PyTorch 实现（见下文 USE 类）
 
 import torch
 import torch.nn as nn
@@ -30,82 +27,102 @@ from BERT.modeling import BertForSequenceClassification, BertConfig
 
 
 
-class USE(object):
-    """USE 句向量模块：加载 TFHub 模块并提供语义相似度计算。
+from transformers import AutoModel, AutoTokenizer
 
-    - 通过 `TFHUB_CACHE_DIR` 指定缓存目录
-    - 构建图并在会话中计算两段文本的余弦相似度与角度相似度
+class USE(object):
+    """Torch 版句向量模块（替代 TFHub USE），提供语义相似度计算。
+
+    - 通过 `TRANSFORMERS_CACHE` 指定模型缓存目录（沿用原 `USE_cache_path`）
+    - 默认使用 `sentence-transformers/all-MiniLM-L6-v2` 并进行 mean pooling
+    - 支持 `USE_ON_GPU=1` 开启 GPU、`SEM_FP16=1` 开启半精度
+    - 提供缓存版 `semantic_sim_cached` 以减少重复编码
     """
     def __init__(self, cache_path):
         super(USE, self).__init__()
-        os.environ['TFHUB_CACHE_DIR'] = cache_path
-        module_url = "https://tfhub.dev/google/universal-sentence-encoder-large/3"
-        # Prefer GPU if available; enable memory growth to avoid OOM at init
-        device = "/CPU:0"
         try:
-            # Default to CPU to avoid TF/PyTorch GPU contention; allow opt-in via USE_ON_GPU=1
-            force_cpu = os.environ.get('USE_ON_CPU', '1') == '1'
-            force_gpu = os.environ.get('USE_ON_GPU') == '1'
-            gpus = tf.config.list_physical_devices('GPU')
-            if gpus and not force_cpu and force_gpu:
-                try:
-                    tf.config.experimental.set_memory_growth(gpus[0], True)
-                except Exception:
-                    pass
-                device = "/GPU:0"
-                print(f"[USE] TensorFlow GPU detected ({gpus[0].name}). Running USE on GPU.")
-            elif force_cpu:
-                device = "/CPU:0"
-                print("[USE] USE_ON_CPU=1 detected or USE_ON_GPU not set. Using CPU for USE.")
-            else:
-                print("[USE] No TensorFlow GPU detected. Running USE on CPU.")
+            os.environ.setdefault('TRANSFORMERS_CACHE', cache_path)
         except Exception:
-            # In TF1 compatibility environments, tf.config may be unavailable; fall back gracefully
-            print("[USE] TensorFlow device query failed; defaulting to CPU.")
-        config = tf.compat.v1.ConfigProto()
-        config.allow_soft_placement = True
-        config.gpu_options.allow_growth = True
-        self._device = device
-        with tf.device(self._device):
-            self.embed = hub.Module(module_url)
-        self.sess = tf.compat.v1.Session(config=config)
-        self.build_graph()
-        self.sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.tables_initializer()])
+            pass
+        model_name = os.environ.get('SEM_MODEL_NAME', 'sentence-transformers/all-MiniLM-L6-v2')
+        use_gpu = torch.cuda.is_available() and os.environ.get('USE_ON_GPU', '0') == '1'
+        self.device = 'cuda' if use_gpu else 'cpu'
+        self.fp16 = (self.device == 'cuda') and (os.environ.get('SEM_FP16', '1') == '1')
+        # 推理最大长度（窗口仅 15 token 左右，64 足够），可通过环境覆盖
+        try:
+            self.max_len = int(os.environ.get('SEM_MAX_LENGTH', '64'))
+        except Exception:
+            self.max_len = 64
 
-    def build_graph(self):
-        with tf.device(self._device):
-            self.sts_input1 = tf.compat.v1.placeholder(tf.string, shape=(None))
-            self.sts_input2 = tf.compat.v1.placeholder(tf.string, shape=(None))
+        # 加载 tokenizer/model
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModel.from_pretrained(model_name)
+            self.model.eval()
+            self.model.to(self.device)
+            print(f"[USE/Torch] Loaded '{model_name}' on {self.device} (fp16={self.fp16}).")
+            self._ok = True
+        except Exception as e:
+            print(f"[USE/Torch] Failed to load '{model_name}': {e}. Fallback to Jaccard overlap.")
+            self._ok = False
 
-            sts_encode1 = tf.nn.l2_normalize(self.embed(self.sts_input1), axis=1)
-            sts_encode2 = tf.nn.l2_normalize(self.embed(self.sts_input2), axis=1)
-            self.cosine_similarities = tf.reduce_sum(tf.multiply(sts_encode1, sts_encode2), axis=1)
-            clip_cosine_similarities = tf.clip_by_value(self.cosine_similarities, -1.0, 1.0)
-            self.sim_scores = 1.0 - tf.acos(clip_cosine_similarities)
-            # Raw embedding op for caching-based batched embedding
-            self.raw_input = tf.compat.v1.placeholder(tf.string, shape=(None))
-            self.raw_encode = tf.nn.l2_normalize(self.embed(self.raw_input), axis=1)
-        # Simple embedding cache to avoid recompute on identical windows
+        # 简单的字符串 -> 向量缓存，减少重复编码
         self._emb_cache = {}
-        # Increase cache capacity to reduce TFHub calls; keeps memory reasonable
         self._emb_cache_max = 50000
 
+    def _encode(self, sents, batch_size=128):
+        if not self._ok:
+            # 不可用时返回 None 以触发回退
+            return None
+        outs = []
+        with torch.inference_mode():
+            for i in range(0, len(sents), batch_size):
+                chunk = sents[i:i+batch_size]
+                if not chunk:
+                    continue
+                enc = self.tokenizer(
+                    chunk,
+                    padding=True,
+                    truncation=True,
+                    max_length=self.max_len,
+                    return_tensors='pt')
+                enc = {k: v.to(self.device, non_blocking=True) for k, v in enc.items()}
+                if self.fp16:
+                    with torch.amp.autocast(device_type='cuda'):
+                        out = self.model(**enc).last_hidden_state
+                else:
+                    out = self.model(**enc).last_hidden_state
+                mask = enc['attention_mask'].unsqueeze(-1).type_as(out)
+                sum_hidden = (out * mask).sum(dim=1)
+                lengths = mask.sum(dim=1).clamp(min=1)
+                emb = sum_hidden / lengths
+                emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+                outs.append(emb.detach().cpu())
+        return torch.cat(outs, dim=0).numpy()
+
+    def _jaccard_batch(self, sents1, sents2):
+        # 轻量级回退：基于 token 集合的 Jaccard 相似度
+        scores = []
+        for a, b in zip(sents1, sents2):
+            sa = set(a.split())
+            sb = set(b.split())
+            inter = len(sa & sb)
+            union = len(sa | sb) or 1
+            scores.append(float(inter) / float(union))
+        return np.asarray(scores, dtype=np.float32)
+
     def semantic_sim(self, sents1, sents2):
-        scores = self.sess.run(
-            [self.sim_scores],
-            feed_dict={
-                self.sts_input1: sents1,
-                self.sts_input2: sents2,
-            })
-        return scores
+        e1 = self._encode(sents1, batch_size=128)
+        e2 = self._encode(sents2, batch_size=128)
+        if e1 is None or e2 is None:
+            return self._jaccard_batch(sents1, sents2)
+        cos = np.sum(e1 * e2, axis=1)
+        cos = np.clip(cos, -1.0, 1.0)
+        return (1.0 - np.arccos(cos)).astype(np.float32)
 
     def semantic_sim_cached(self, sents1, sents2, batch_size=128):
-        """Compute semantic similarity using cached embeddings to reduce redundant TFHub calls.
-
-        - Embeds unique strings only once, caches results.
-        - Computes cosine similarity and converts to the same score space as semantic_sim.
-        """
-        # Collect unique strings
+        if not self._ok:
+            return self._jaccard_batch(sents1, sents2)
+        # 仅编码未缓存字符串
         uniq = []
         seen = set()
         for s in sents1:
@@ -116,31 +133,22 @@ class USE(object):
             if s not in seen:
                 uniq.append(s)
                 seen.add(s)
-
-        # Embed missing strings in chunks
         missing = [s for s in uniq if s not in self._emb_cache]
-        try:
-            for i in range(0, len(missing), batch_size):
-                chunk = missing[i:i+batch_size]
-                if not chunk:
-                    continue
-                emb = self.sess.run(self.raw_encode, feed_dict={self.raw_input: chunk})
-                for s, v in zip(chunk, emb):
-                    # capacity control
+        if missing:
+            emb = self._encode(missing, batch_size=batch_size)
+            if emb is not None:
+                for s, v in zip(missing, emb):
                     if len(self._emb_cache) >= self._emb_cache_max:
                         self._emb_cache.clear()
                     self._emb_cache[s] = v
-        except Exception:
-            # Fallback to original method if embedding fails
-            return self.semantic_sim(sents1, sents2)[0]
-
-        # Build arrays for pairwise cosine similarity
+            else:
+                # 模型不可用时，直接回退
+                return self._jaccard_batch(sents1, sents2)
         e1 = np.stack([self._emb_cache[s] for s in sents1], axis=0)
         e2 = np.stack([self._emb_cache[s] for s in sents2], axis=0)
         cos = np.sum(e1 * e2, axis=1)
         cos = np.clip(cos, -1.0, 1.0)
-        scores = 1.0 - np.arccos(cos)
-        return scores
+        return (1.0 - np.arccos(cos)).astype(np.float32)
 
 def pick_most_similar_words_batch(src_words, sim_mat, idx2word, ret_count=10, threshold=0.):
     """
