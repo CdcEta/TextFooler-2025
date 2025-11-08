@@ -4,6 +4,8 @@ import argparse
 import os
 # Suppress verbose TensorFlow logs (INFO/WARNING) to reduce GPU DLL noise
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+# Reduce CUDA allocator fragmentation on small-memory GPUs
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True,max_split_size_mb:64')
 import numpy as np
 import dataloader
 from train_classifier import Model
@@ -162,7 +164,7 @@ class NLI_infer_BERT(nn.Module):
                  max_seq_length=128,
                  batch_size=32,
                  auto_gpu=False,
-                 gpu_fill_target=0.9,
+                 gpu_fill_target=0.80,
                  num_workers=2,
                  prefetch_factor=2,
                  fp16=False):
@@ -362,31 +364,47 @@ class NLI_infer_BERT(nn.Module):
             except Exception:
                 pass
             with torch.inference_mode():
-                if self.fp16:
-                    with torch.amp.autocast(device_type='cuda'):
+                def _forward_batch(ids_t, seg_t, msk_t):
+                    if self.fp16:
+                        with torch.amp.autocast(device_type='cuda'):
+                            return self.model(ids_t, seg_t, msk_t)
+                    else:
+                        return self.model(ids_t, seg_t, msk_t)
+                try:
+                    logits = _forward_batch(cur_ids, cur_seg, cur_mask)
+                    probs = nn.functional.softmax(logits, dim=-1)
+                    probs_all.append(probs)
+                except torch.OutOfMemoryError as oom:
+                    new_bs = max(1, effective_bs // 2)
+                    print(f"[AutoGPU] OOM caught. Splitting batch {effective_bs} -> {new_bs} and retrying.")
+                    effective_bs = new_bs
+                    local_probs = []
+                    offset = 0
+                    while offset < cur_ids.size(0):
+                        end = min(offset + new_bs, cur_ids.size(0))
                         try:
-                            logits = self.model(cur_ids, cur_seg, cur_mask)
-                        except Exception as e:
+                            logits_part = _forward_batch(cur_ids[offset:end], cur_seg[offset:end], cur_mask[offset:end])
+                        except Exception as e2:
                             if getattr(self, "_compiled", False):
-                                print(f"[Perf] torch.compile runtime failed; reverting to eager: {e}")
+                                print(f"[Perf] torch.compile runtime failed during micro-batch; reverting to eager: {e2}")
                                 self.model = self.model_eager
                                 self._compiled = False
-                                logits = self.model(cur_ids, cur_seg, cur_mask)
+                                logits_part = _forward_batch(cur_ids[offset:end], cur_seg[offset:end], cur_mask[offset:end])
                             else:
                                 raise
-                else:
-                    try:
-                        logits = self.model(cur_ids, cur_seg, cur_mask)
-                    except Exception as e:
-                        if getattr(self, "_compiled", False):
-                            print(f"[Perf] torch.compile runtime failed; reverting to eager: {e}")
-                            self.model = self.model_eager
-                            self._compiled = False
-                            logits = self.model(cur_ids, cur_seg, cur_mask)
-                        else:
-                            raise
-                probs = nn.functional.softmax(logits, dim=-1)
-                probs_all.append(probs)
+                        local_probs.append(nn.functional.softmax(logits_part, dim=-1))
+                        offset = end
+                    probs_all.append(torch.cat(local_probs, dim=0))
+                except Exception as e:
+                    if getattr(self, "_compiled", False):
+                        print(f"[Perf] torch.compile runtime failed; reverting to eager: {e}")
+                        self.model = self.model_eager
+                        self._compiled = False
+                        logits = _forward_batch(cur_ids, cur_seg, cur_mask)
+                        probs = nn.functional.softmax(logits, dim=-1)
+                        probs_all.append(probs)
+                    else:
+                        raise
             free_after, total_mem2 = (0, total_mem)
             try:
                 free_after, total_mem2 = torch.cuda.mem_get_info()
