@@ -13,12 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""BERT finetuning runner.
-
-中文摘要：BERT 微调与评估入口脚本，包含数据处理器（各任务）、
-特征转换、训练/评估流程与参数解析。通过传入 `--task_name`、
-`--data_dir`、`--output_dir` 等参数执行对应任务的微调。
-"""
+"""BERT finetuning runner."""
 
 from __future__ import absolute_import, division, print_function
 
@@ -561,7 +556,6 @@ def accuracy(out, labels):
 
 
 def main():
-    # 主入口：解析命令行参数，准备数据与模型，执行训练与评估。
     parser = argparse.ArgumentParser()
 
     ## Required parameters
@@ -856,6 +850,13 @@ def main():
         output_config_file = os.path.join(args.output_dir, CONFIG_NAME)
         with open(output_config_file, 'w') as f:
             f.write(model_to_save.config.to_json_string())
+        # Also save a copy named 'bert_config.json' for downstream tools expecting this filename
+        try:
+            output_bert_config_file = os.path.join(args.output_dir, 'bert_config.json')
+            with open(output_bert_config_file, 'w') as f:
+                f.write(model_to_save.config.to_json_string())
+        except Exception:
+            pass
 
         # Save tokenizer files (vocab.txt, tokenizer_config.json, special_tokens_map.json)
         try:
@@ -935,6 +936,14 @@ def main():
             for key in sorted(result.keys()):
                 logger.info("  %s = %s", key, str(result[key]))
                 writer.write("%s = %s\n" % (key, str(result[key])))
+        # Also write alias file named 'eval' for compatibility
+        try:
+            alias_eval = os.path.join(args.output_dir, "eval")
+            with open(alias_eval, "w") as writer:
+                for key in sorted(result.keys()):
+                    writer.write("%s = %s\n" % (key, str(result[key])))
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

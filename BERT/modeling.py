@@ -740,6 +740,52 @@ class BertPreTrainedModel(nn.Module):
         for old_key, new_key in zip(old_keys, new_keys):
             state_dict[new_key] = state_dict.pop(old_key)
 
+        # Filter out classifier head weights if their shapes don't match the current model.
+        # This avoids size mismatch errors when loading checkpoints trained with different
+        # numbers of labels than the current configuration.
+        try:
+            # Single classifier head (BertForSequenceClassification)
+            if hasattr(model, 'classifier') and isinstance(model.classifier, nn.Linear):
+                w_key = 'classifier.weight'
+                b_key = 'classifier.bias'
+                if w_key in state_dict:
+                    sw = state_dict[w_key]
+                    mw = model.classifier.weight.data
+                    if hasattr(sw, 'shape') and sw.shape != mw.shape:
+                        logger.info("Ignoring mismatched classifier.weight: {} vs {}".format(tuple(sw.shape), tuple(mw.shape)))
+                        state_dict.pop(w_key, None)
+                if b_key in state_dict:
+                    sb = state_dict[b_key]
+                    mb = model.classifier.bias.data
+                    if hasattr(sb, 'shape') and sb.shape != mb.shape:
+                        logger.info("Ignoring mismatched classifier.bias: {} vs {}".format(tuple(sb.shape), tuple(mb.shape)))
+                        state_dict.pop(b_key, None)
+
+            # Multi-task classifier head as ModuleList (BertForSequenceClassification_MT)
+            if hasattr(model, 'classifier') and isinstance(model.classifier, nn.ModuleList):
+                for k in list(state_dict.keys()):
+                    if k.startswith('classifier.') and k.count('.') >= 2:
+                        parts = k.split('.')
+                        # Format: classifier.<idx>.weight/bias
+                        if len(parts) >= 3 and parts[1].isdigit():
+                            idx = int(parts[1])
+                            param_name = parts[2]
+                            if idx >= len(model.classifier):
+                                # Head index not present in current model
+                                logger.info("Dropping classifier head key not present in current model: {}".format(k))
+                                state_dict.pop(k, None)
+                                continue
+                            target_param = getattr(model.classifier[idx], param_name, None)
+                            if target_param is not None:
+                                sv = state_dict[k]
+                                mv = target_param.data
+                                if hasattr(sv, 'shape') and sv.shape != mv.shape:
+                                    logger.info("Ignoring mismatched {}: {} vs {}".format(k, tuple(sv.shape), tuple(mv.shape)))
+                                    state_dict.pop(k, None)
+        except Exception:
+            # Be permissive; if any issue occurs, proceed with default loading behavior
+            pass
+
         missing_keys = []
         unexpected_keys = []
         error_msgs = []
@@ -770,13 +816,18 @@ class BertPreTrainedModel(nn.Module):
                 state_dict._metadata = metadata
             load(model, prefix=start_prefix)
 
-        ### temporarily initialize the top-level lenear layer randomly
+        ### temporarily initialize the top-level linear layer randomly (if present)
         try:
-            logger.info("Randomly initialize the top level classifiers!")
-            model.classifiers.weight.data.normal_(mean=0.0, std=config.initializer_range)
-            model.classifiers.bias.data.zero_()
-        except:
-            logger.info("Failed for Randomly initialize the top level classifiers!")
+            if hasattr(model, 'classifier') and isinstance(model.classifier, nn.Linear):
+                logger.info("Randomly initialize the top-level classifier!")
+                model.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
+                model.classifier.bias.data.zero_()
+            elif hasattr(model, 'classifiers') and isinstance(model.classifiers, nn.Linear):
+                logger.info("Randomly initialize the top-level classifiers!")
+                model.classifiers.weight.data.normal_(mean=0.0, std=config.initializer_range)
+                model.classifiers.bias.data.zero_()
+        except Exception:
+            logger.info("Skipping random init for top-level classifier due to unexpected structure.")
             pass
 
         if len(missing_keys) > 0:
