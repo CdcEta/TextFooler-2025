@@ -43,9 +43,11 @@ class USE(object):
         # Prefer GPU if available; enable memory growth to avoid OOM at init
         device = "/CPU:0"
         try:
-            force_cpu = os.environ.get('USE_ON_CPU') == '1'
+            # Default to CPU to avoid TF/PyTorch GPU contention; allow opt-in via USE_ON_GPU=1
+            force_cpu = os.environ.get('USE_ON_CPU', '1') == '1'
+            force_gpu = os.environ.get('USE_ON_GPU') == '1'
             gpus = tf.config.list_physical_devices('GPU')
-            if gpus and not force_cpu:
+            if gpus and not force_cpu and force_gpu:
                 try:
                     tf.config.experimental.set_memory_growth(gpus[0], True)
                 except Exception:
@@ -54,7 +56,7 @@ class USE(object):
                 print(f"[USE] TensorFlow GPU detected ({gpus[0].name}). Running USE on GPU.")
             elif force_cpu:
                 device = "/CPU:0"
-                print("[USE] USE_ON_CPU=1 detected. Forcing USE on CPU.")
+                print("[USE] USE_ON_CPU=1 detected or USE_ON_GPU not set. Using CPU for USE.")
             else:
                 print("[USE] No TensorFlow GPU detected. Running USE on CPU.")
         except Exception:
@@ -97,7 +99,7 @@ class USE(object):
             })
         return scores
 
-    def semantic_sim_cached(self, sents1, sents2, batch_size=512):
+    def semantic_sim_cached(self, sents1, sents2, batch_size=128):
         """Compute semantic similarity using cached embeddings to reduce redundant TFHub calls.
 
         - Embeds unique strings only once, caches results.
